@@ -318,7 +318,7 @@ from
 
     group by
     month,
-    c
+    t1.store_id
     ) t1
     )
 

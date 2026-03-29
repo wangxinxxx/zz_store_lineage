@@ -9,6 +9,9 @@ target/
 .m2-central/
 spark-warehouse/
 tmp/
+.nebula-importer-bundles/
+maven-debug.log
+vendor/
 
 ### IntelliJ IDEA ###
 .idea/

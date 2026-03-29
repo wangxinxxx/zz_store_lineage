@@ -1,6 +1,9 @@
 package com.zhuanzhuan.lineage.app;
 
-import java.nio.file.Files;
+import com.zhuanzhuan.lineage.storage.nebula.NebulaGraphConfig;
+import com.zhuanzhuan.lineage.storage.nebula.NebulaImporterBundleWriter;
+import com.zhuanzhuan.lineage.storage.nebula.SparkNebulaConnectorImporter;
+
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
@@ -15,8 +18,21 @@ public final class SqlScriptImportTool {
         }
 
         boolean clearOnly = "--clear-only".equals(args[0]);
-        boolean clearFirst = "--clear-first".equals(args[0]);
         boolean syncMetadataOnly = "--sync-metadata".equals(args[0]);
+        boolean exportImporterBundle = "--export-importer-bundle".equals(args[0]);
+        boolean sparkImportBundle = "--spark-import-bundle".equals(args[0]);
+
+        if (sparkImportBundle) {
+            if (args.length < 2) {
+                printUsage();
+                return;
+            }
+            printSparkImportSummary(new SparkNebulaConnectorImporter(
+                    NebulaGraphConfig.fromSystem(),
+                    SparkNebulaConnectorImporter.ImportOptions.fromSystem()
+            ).importBundle(Paths.get(args[1])));
+            return;
+        }
 
         try (SqlScriptImportService service = SqlScriptImportService.createDefault()) {
             if (clearOnly) {
@@ -25,91 +41,51 @@ public final class SqlScriptImportTool {
                 return;
             }
 
-            Path scriptPath;
-            if (clearFirst || syncMetadataOnly) {
+            Path targetPath;
+            if (syncMetadataOnly || exportImporterBundle) {
                 if (args.length < 2) {
                     printUsage();
                     return;
                 }
-                scriptPath = Paths.get(args[1]);
-                if (clearFirst) {
-                    service.clearStorage();
-                }
+                targetPath = Paths.get(args[1]);
             } else {
-                scriptPath = Paths.get(args[0]);
+                targetPath = Paths.get(args[0]);
             }
 
             if (syncMetadataOnly) {
-                printMetadataSyncSummary(service.syncMetadata(scriptPath));
+                printMetadataSyncSummary(service.syncMetadata(targetPath));
                 return;
             }
 
-            if (Files.isDirectory(scriptPath)) {
-                printDirectorySummary(service.importDirectory(scriptPath, new SqlScriptImportService.ImportProgressListener() {
-                    @Override
-                    public void onScriptStart(Path sqlFile, int index, int totalScripts) {
-                        System.out.println("Importing script [" + index + "/" + totalScripts + "]: " + sqlFile.toAbsolutePath());
-                    }
-
-                    @Override
-                    public void onScriptFinish(SqlScriptImportService.ImportSummary summary, int index, int totalScripts) {
-                        System.out.println(
-                                "Finished script [" + index + "/" + totalScripts + "]: "
-                                        + summary.getScriptPath().toAbsolutePath()
-                                        + " | imported=" + summary.getImportedStatements()
-                                        + " | failed=" + summary.getFailedStatements()
-                                        + " | skipped=" + summary.getSkippedStatements()
-                                        + " | durationMs=" + summary.getDurationMs()
-                        );
-                    }
-                }));
-            } else {
-                printScriptSummary(service.importScript(scriptPath));
-            }
+            printBundleSummary(service.exportImporterBundle(targetPath));
         }
     }
 
-    private static void printScriptSummary(SqlScriptImportService.ImportSummary summary) {
-        System.out.println("Script import finished.");
-        System.out.println("Script path        : " + summary.getScriptPath().toAbsolutePath());
-        System.out.println("Total statements   : " + summary.getTotalStatements());
-        System.out.println("Skipped statements : " + summary.getSkippedStatements());
-        System.out.println("Imported statements: " + summary.getImportedStatements());
-        System.out.println("Failed statements  : " + summary.getFailedStatements());
-        System.out.println("Duration ms        : " + summary.getDurationMs());
-        if (!summary.getFailures().isEmpty()) {
-            System.out.println("Failures:");
-            for (String failure : summary.getFailures()) {
-                System.out.println("  " + failure);
-            }
-        }
-    }
-
-    private static void printDirectorySummary(SqlScriptImportService.DirectoryImportSummary summary) {
-        System.out.println("Directory import finished.");
-        System.out.println("Directory path     : " + summary.getDirectoryPath().toAbsolutePath());
+    private static void printBundleSummary(NebulaImporterBundleWriter.BundleSummary summary) {
+        System.out.println("Importer bundle export finished.");
+        System.out.println("Bundle directory   : " + summary.getBundleDir().toAbsolutePath());
+        System.out.println("Importer config    : " + summary.getImporterConfigPath().toAbsolutePath());
+        System.out.println("Schema file        : " + summary.getSchemaPath().toAbsolutePath());
+        System.out.println("Run script (ps1)   : " + summary.getRunPs1Path().toAbsolutePath());
+        System.out.println("Run script (sh)    : " + summary.getRunShPath().toAbsolutePath());
         System.out.println("Total scripts      : " + summary.getTotalScripts());
-        System.out.println("Successful scripts : " + summary.getSuccessfulScripts());
-        System.out.println("Partial scripts    : " + summary.getPartialScripts());
-        System.out.println("Failed scripts     : " + summary.getFailedScripts());
-        System.out.println("Skipped scripts    : " + summary.getSkippedScripts());
-        System.out.println("Total statements   : " + summary.getTotalStatements());
-        System.out.println("Skipped statements : " + summary.getSkippedStatements());
-        System.out.println("Imported statements: " + summary.getImportedStatements());
-        System.out.println("Failed statements  : " + summary.getFailedStatements());
+        System.out.println("Total events       : " + summary.getTotalEvents());
+        System.out.println("Total results      : " + summary.getTotalResults());
+        System.out.println("Vertex files       : " + summary.getVertexFiles());
+        System.out.println("Edge files         : " + summary.getEdgeFiles());
+        System.out.println("Total vertices     : " + summary.getTotalVertices());
+        System.out.println("Total edges        : " + summary.getTotalEdges());
         System.out.println("Duration ms        : " + summary.getDurationMs());
-        for (SqlScriptImportService.ImportSummary fileSummary : summary.getFileSummaries()) {
-            if (fileSummary.getImportedStatements() == 0 && fileSummary.getFailedStatements() == 0) {
-                System.out.println("Skipped file       : " + fileSummary.getScriptPath().toAbsolutePath());
-                continue;
-            }
-            if (fileSummary.getFailedStatements() > 0) {
-                System.out.println("Failures in " + fileSummary.getScriptPath().toAbsolutePath() + ":");
-                for (String failure : fileSummary.getFailures()) {
-                    System.out.println("  " + failure);
-                }
-            }
-        }
+    }
+
+    private static void printSparkImportSummary(SparkNebulaConnectorImporter.ImportSummary summary) {
+        System.out.println("Spark connector import finished.");
+        System.out.println("Bundle directory   : " + summary.getBundleDir().toAbsolutePath());
+        System.out.println("Vertex files       : " + summary.getImportedVertexFiles());
+        System.out.println("Edge files         : " + summary.getImportedEdgeFiles());
+        System.out.println("Total vertices     : " + summary.getTotalVertices());
+        System.out.println("Total edges        : " + summary.getTotalEdges());
+        System.out.println("Duration ms        : " + summary.getDurationMs());
     }
 
     private static void printMetadataSyncSummary(SqlScriptImportService.MetadataSyncSummary summary) {
@@ -136,12 +112,28 @@ public final class SqlScriptImportTool {
         System.out.println("Usage:");
         System.out.println("  SqlScriptImportTool --clear-only");
         System.out.println("  SqlScriptImportTool --sync-metadata <script-path-or-directory>");
-        System.out.println("  SqlScriptImportTool --clear-first <script-path>");
+        System.out.println("  SqlScriptImportTool --export-importer-bundle <script-path-or-directory>");
+        System.out.println("  SqlScriptImportTool --spark-import-bundle <bundle-directory>");
         System.out.println("  SqlScriptImportTool <script-path-or-directory>");
+        System.out.println("Workflow:");
+        System.out.println("  1. Parse SQL and export a Nebula importer bundle.");
+        System.out.println("     Default invocation and --export-importer-bundle do the same thing.");
+        System.out.println("  2. Wait for bundle generation to finish, then run --spark-import-bundle.");
         System.out.println("Config:");
         System.out.println("  -D" + SqlScriptImportService.DATAMAP_BASE_URL_PROPERTY + "=https://dp.58corp.com");
         System.out.println("  -D" + SqlScriptImportService.DATAMAP_COOKIE_PROPERTY + "='cookie string'");
         System.out.println("  -D" + SqlScriptImportService.LOCAL_METADATA_CACHE_DIR_PROPERTY + "=/path/to/local/metadata-cache");
-        System.out.println("  (导入前可先用 --sync-metadata 批量同步依赖表元数据到本地缓存。)");
+        System.out.println("  -D" + NebulaImporterBundleWriter.BUNDLE_DIR_PROPERTY + "=/path/to/importer-bundles");
+        System.out.println("  -D" + NebulaImporterBundleWriter.IMPORTER_BATCH_PROPERTY + "=1024");
+        System.out.println("  -D" + NebulaImporterBundleWriter.IMPORTER_READER_CONCURRENCY_PROPERTY + "=8");
+        System.out.println("  -D" + NebulaImporterBundleWriter.IMPORTER_CONCURRENCY_PROPERTY + "=64");
+        System.out.println("  -D" + NebulaGraphConfig.META_ADDRESS_PROPERTY + "=127.0.0.1:9559");
+        System.out.println("  -D" + NebulaGraphConfig.GRAPH_ADDRESS_PROPERTY + "=127.0.0.1:9669");
+        System.out.println("  -D" + SparkNebulaConnectorImporter.SPARK_MASTER_PROPERTY + "=local[*]");
+        System.out.println("  -D" + SparkNebulaConnectorImporter.REPARTITION_PROPERTY + "=8");
+        System.out.println("  -D" + SparkNebulaConnectorImporter.BATCH_PROPERTY + "=1024");
+        System.out.println("  -D" + SparkNebulaConnectorImporter.PARALLEL_SCHEMA_PROPERTY + "=4");
+        System.out.println("  -D" + SparkNebulaConnectorImporter.VERTICES_ONLY_PROPERTY + "=true");
+        System.out.println("  Run --sync-metadata before exporting when you want to warm the local metadata cache.");
     }
 }

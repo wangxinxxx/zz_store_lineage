@@ -8,17 +8,20 @@ source "${SCRIPT_DIR}/lib/build_runtime_classpath.sh"
 DEFAULT_JAVA8="/Users/zz/Library/Java/JavaVirtualMachines/corretto-1.8.0_482/Contents/Home/bin/java"
 DEFAULT_JBR="/Applications/IntelliJ IDEA.app/Contents/jbr/Contents/Home/bin/java"
 
-if [[ -x "${DEFAULT_JAVA8}" ]]; then
-  JAVA_BIN="${JAVA_BIN:-${DEFAULT_JAVA8}}"
-else
-  JAVA_BIN="${JAVA_BIN:-${DEFAULT_JBR}}"
+JAVA_BIN="${JAVA_BIN:-java}"
+if ! command -v "${JAVA_BIN}" >/dev/null 2>&1; then
+  if [[ -x "${DEFAULT_JAVA8}" ]]; then
+    JAVA_BIN="${DEFAULT_JAVA8}"
+  else
+    JAVA_BIN="${DEFAULT_JBR}"
+  fi
 fi
 
-MAVEN_BIN="${MAVEN_BIN:-/Applications/IntelliJ IDEA.app/Contents/plugins/maven/lib/maven3/bin/mvn}"
+MAVEN_BIN="${MAVEN_BIN:-mvn}"
 
 cd "${REPO_DIR}"
 
-"${MAVEN_BIN}" -o -q test-compile
+"${MAVEN_BIN}" -q test-compile
 
 JAR_CP="$(build_runtime_classpath "${REPO_DIR}")"
 

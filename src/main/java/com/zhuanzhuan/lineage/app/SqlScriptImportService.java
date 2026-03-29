@@ -16,6 +16,9 @@ import com.zhuanzhuan.lineage.model.TableRef;
 import com.zhuanzhuan.lineage.parser.DefaultSparkLineageParser;
 import com.zhuanzhuan.lineage.storage.LineageStorage;
 import com.zhuanzhuan.lineage.storage.LineageStorageFactory;
+import com.zhuanzhuan.lineage.storage.nebula.NebulaGraphConfig;
+import com.zhuanzhuan.lineage.storage.nebula.NebulaImporterBundleWriter;
+import com.zhuanzhuan.lineage.storage.nebula.SparkNebulaConnectorImporter;
 import org.apache.hadoop.hive.metastore.api.FieldSchema;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.analysis.UnresolvedRelation;
@@ -69,12 +72,8 @@ public final class SqlScriptImportService implements AutoCloseable {
     private final Set<String> hydratedTables;
     private final LocalTableMetadataStore metadataStore;
     private final DataMapTableMetadataFetcher metadataFetcher;
-
-    public interface ImportProgressListener {
-        void onScriptStart(Path scriptPath, int index, int totalScripts);
-
-        void onScriptFinish(ImportSummary summary, int index, int totalScripts);
-    }
+    private final NebulaImporterBundleWriter bundleWriter;
+    private final SparkNebulaConnectorImporter connectorImporter;
 
     public SqlScriptImportService(
             SparkSession spark,
@@ -83,7 +82,9 @@ public final class SqlScriptImportService implements AutoCloseable {
             String owner,
             String bizDateToken,
             LocalTableMetadataStore metadataStore,
-            DataMapTableMetadataFetcher metadataFetcher
+            DataMapTableMetadataFetcher metadataFetcher,
+            NebulaImporterBundleWriter bundleWriter,
+            SparkNebulaConnectorImporter connectorImporter
     ) {
         this.spark = spark;
         this.parser = parser;
@@ -93,6 +94,8 @@ public final class SqlScriptImportService implements AutoCloseable {
         this.hydratedTables = new HashSet<String>();
         this.metadataStore = metadataStore;
         this.metadataFetcher = metadataFetcher;
+        this.bundleWriter = bundleWriter;
+        this.connectorImporter = connectorImporter;
     }
 
     public static SqlScriptImportService createDefault() throws IOException {
@@ -117,7 +120,16 @@ public final class SqlScriptImportService implements AutoCloseable {
                 "sql_script_importer",
                 LocalDate.now().format(DATE_TOKEN),
                 metadataStore,
-                metadataFetcher
+                metadataFetcher,
+                new NebulaImporterBundleWriter(
+                        NebulaImporterBundleWriter.resolveBundleDirFromSystem(),
+                        NebulaGraphConfig.fromSystem(),
+                        NebulaImporterBundleWriter.ImporterOptions.fromSystem()
+                ),
+                new SparkNebulaConnectorImporter(
+                        NebulaGraphConfig.fromSystem(),
+                        SparkNebulaConnectorImporter.ImportOptions.fromSystem()
+                )
         );
     }
 
@@ -146,6 +158,25 @@ public final class SqlScriptImportService implements AutoCloseable {
         applySparkOverrides(builder);
         builder.config("spark.sql.catalogImplementation", "in-memory");
         return builder.getOrCreate();
+    }
+
+    private void stopActiveSparkSession() {
+        if (spark == null) {
+            return;
+        }
+        Path warehousePath = null;
+        try {
+            warehousePath = Paths.get(spark.conf().get("spark.sql.warehouse.dir"));
+        } catch (Exception ignored) {
+        }
+        try {
+            spark.stop();
+        } finally {
+            spark = null;
+            if (warehousePath != null) {
+                deleteRecursively(warehousePath);
+            }
+        }
     }
 
     public void clearStorage() {
@@ -196,65 +227,35 @@ public final class SqlScriptImportService implements AutoCloseable {
         return summary;
     }
 
-    public ImportSummary importScript(Path scriptPath) throws IOException {
-        PreparedImport prepared = prepareImport(scriptPath.toAbsolutePath().normalize(), false);
-        try {
-            storage.saveBatch(prepared.events, prepared.results);
-            prepared.summary.importedStatements += prepared.results.size();
-            for (ExecutionCaptureEvent event : prepared.events) {
-                prepared.summary.importedEvents.add(event.getEventId());
-            }
-        } catch (Exception error) {
-            prepared.summary.failedStatements += prepared.results.size();
-            prepared.summary.failures.add("storage: " + formatError(error));
+    public NebulaImporterBundleWriter.BundleSummary exportImporterBundle(Path scriptPath) throws IOException {
+        Path absolutePath = scriptPath.toAbsolutePath().normalize();
+        if (Files.isDirectory(absolutePath)) {
+            return exportImporterBundleDirectory(absolutePath);
         }
-        prepared.summary.markFinished();
-        return prepared.summary;
+        try (NebulaImporterBundleWriter.BundleSession bundleSession = bundleWriter.openSession(buildBatchName(absolutePath))) {
+            PreparedImport prepared = prepareImport(absolutePath, false);
+            bundleSession.appendScript(absolutePath, prepared.events, prepared.results);
+            return bundleSession.finish();
+        }
     }
 
-    public DirectoryImportSummary importDirectory(Path directoryPath) throws IOException {
-        return importDirectory(directoryPath, null);
+    public SparkNebulaConnectorImporter.ImportSummary runSparkImportBundle(Path bundleDir) throws IOException {
+        stopActiveSparkSession();
+        return connectorImporter.importBundle(bundleDir);
     }
 
-    public DirectoryImportSummary importDirectory(Path directoryPath, ImportProgressListener listener) throws IOException {
-        Path absolutePath = directoryPath.toAbsolutePath().normalize();
-        if (!Files.isDirectory(absolutePath)) {
-            throw new IllegalArgumentException("Path is not a directory: " + absolutePath);
+    private NebulaImporterBundleWriter.BundleSummary exportImporterBundleDirectory(Path directoryPath) throws IOException {
+        if (!Files.isDirectory(directoryPath)) {
+            throw new IllegalArgumentException("Path is not a directory: " + directoryPath);
         }
-
-        DirectoryImportSummary summary = new DirectoryImportSummary(absolutePath);
-        summary.markStarted();
-        List<Path> sqlFiles = listSqlFiles(absolutePath);
-        for (int i = 0; i < sqlFiles.size(); i++) {
-            Path sqlFile = sqlFiles.get(i);
-            int index = i + 1;
-            if (listener != null) {
-                listener.onScriptStart(sqlFile, index, sqlFiles.size());
+        List<Path> sqlFiles = listSqlFiles(directoryPath);
+        try (NebulaImporterBundleWriter.BundleSession bundleSession = bundleWriter.openSession(buildBatchName(directoryPath))) {
+            for (Path sqlFile : sqlFiles) {
+                PreparedImport prepared = prepareImport(sqlFile, false);
+                bundleSession.appendScript(sqlFile, prepared.events, prepared.results);
             }
-            PreparedImport prepared = prepareImport(sqlFile, false);
-            String storageFailure = null;
-            try {
-                storage.saveBatch(prepared.events, prepared.results);
-            } catch (Exception error) {
-                storageFailure = formatError(error);
-            }
-            if (storageFailure == null) {
-                prepared.summary.importedStatements += prepared.results.size();
-                for (ExecutionCaptureEvent event : prepared.events) {
-                    prepared.summary.importedEvents.add(event.getEventId());
-                }
-            } else {
-                prepared.summary.failedStatements += prepared.results.size();
-                prepared.summary.failures.add("storage: " + storageFailure);
-            }
-            prepared.summary.markFinished();
-            summary.add(prepared.summary);
-            if (listener != null) {
-                listener.onScriptFinish(prepared.summary, index, sqlFiles.size());
-            }
+            return bundleSession.finish();
         }
-        summary.markFinished();
-        return summary;
     }
 
     private PreparedImport prepareImport(Path scriptPath, boolean syncMetadataFirst) throws IOException {
@@ -266,8 +267,6 @@ public final class SqlScriptImportService implements AutoCloseable {
             syncMetadataForStatements(renderLineageStatements(statements, variables), absolutePath);
         }
 
-        ImportSummary summary = new ImportSummary(absolutePath);
-        summary.markStarted();
         List<ExecutionCaptureEvent> bufferedEvents = new ArrayList<ExecutionCaptureEvent>();
         List<NormalizedLineageResult> bufferedResults = new ArrayList<NormalizedLineageResult>();
 
@@ -278,16 +277,13 @@ public final class SqlScriptImportService implements AutoCloseable {
                 continue;
             }
 
-            summary.totalStatements++;
             if (isSetStatement(statement)) {
                 registerSetVariable(variables, statement);
-                summary.skippedStatements++;
                 continue;
             }
 
             String renderedStatement = replacePlaceholders(statement, variables);
             if (!isLineageStatement(renderedStatement)) {
-                summary.skippedStatements++;
                 continue;
             }
 
@@ -304,27 +300,15 @@ public final class SqlScriptImportService implements AutoCloseable {
                 bufferedEvents.add(event);
                 bufferedResults.add(result);
             } catch (Exception error) {
-                summary.failedStatements++;
-                summary.failures.add("statement#" + lineageStatementIndex + ": " + formatError(error));
             }
         }
-        return new PreparedImport(summary, bufferedEvents, bufferedResults);
+        return new PreparedImport(bufferedEvents, bufferedResults);
     }
 
     @Override
     public void close() {
         try {
-            if (spark != null) {
-                Path warehousePath = null;
-                try {
-                    warehousePath = Paths.get(spark.conf().get("spark.sql.warehouse.dir"));
-                } catch (Exception ignored) {
-                }
-                spark.stop();
-                if (warehousePath != null) {
-                    deleteRecursively(warehousePath);
-                }
-            }
+            stopActiveSparkSession();
         } finally {
             if (storage instanceof AutoCloseable) {
                 try {
@@ -650,7 +634,7 @@ public final class SqlScriptImportService implements AutoCloseable {
             java.util.Optional<TableMetadataSnapshot> snapshot = metadataStore.load(tableRef);
             if (snapshot.isPresent()) {
                 TableMetadataSnapshot value = snapshot.get();
-                createPlaceholderTable(
+                createPlaceholderView(
                         database,
                         tableRef.getName(),
                         value.getColumns(),
@@ -663,7 +647,7 @@ public final class SqlScriptImportService implements AutoCloseable {
 
         List<FieldSchema> sqlDerivedColumns = deriveColumnsFromSql(sqlText, tableRef);
         if (!sqlDerivedColumns.isEmpty()) {
-            createPlaceholderTable(database, tableRef.getName(), sqlDerivedColumns, Collections.<FieldSchema>emptyList());
+            createPlaceholderView(database, tableRef.getName(), sqlDerivedColumns, Collections.<FieldSchema>emptyList());
             return;
         }
 
@@ -692,7 +676,8 @@ public final class SqlScriptImportService implements AutoCloseable {
             List<FieldSchema> partitionKeys
     ) {
         spark.sql("CREATE DATABASE IF NOT EXISTS " + quotedIdentifier(database));
-        List<FieldSchema> effectiveColumns = removePartitionColumns(columns, partitionKeys);
+        List<FieldSchema> effectiveColumns = deduplicateColumnsIgnoreCase(removePartitionColumns(columns, partitionKeys));
+        List<FieldSchema> effectivePartitionKeys = deduplicateColumnsIgnoreCase(partitionKeys);
 
         StringBuilder ddl = new StringBuilder();
         ddl.append("CREATE TABLE IF NOT EXISTS ")
@@ -703,9 +688,29 @@ public final class SqlScriptImportService implements AutoCloseable {
                 .append(joinColumns(effectiveColumns))
                 .append(")")
                 .append(" USING parquet");
-        if (partitionKeys != null && !partitionKeys.isEmpty()) {
-            ddl.append(" PARTITIONED BY (").append(joinColumns(partitionKeys)).append(")");
+        if (effectivePartitionKeys != null && !effectivePartitionKeys.isEmpty()) {
+            ddl.append(" PARTITIONED BY (").append(joinColumns(effectivePartitionKeys)).append(")");
         }
+        spark.sql(ddl.toString());
+    }
+
+    private void createPlaceholderView(
+            String database,
+            String tableName,
+            List<FieldSchema> columns,
+            List<FieldSchema> partitionKeys
+    ) {
+        spark.sql("CREATE DATABASE IF NOT EXISTS " + quotedIdentifier(database));
+        List<FieldSchema> effectiveColumns = deduplicateColumnsIgnoreCase(mergeColumns(columns, partitionKeys));
+
+        StringBuilder ddl = new StringBuilder();
+        ddl.append("CREATE OR REPLACE VIEW ")
+                .append(quotedIdentifier(database))
+                .append(".")
+                .append(quotedIdentifier(tableName))
+                .append(" AS SELECT ")
+                .append(renderPlaceholderProjection(effectiveColumns))
+                .append(" WHERE 1 = 0");
         spark.sql(ddl.toString());
     }
 
@@ -754,6 +759,42 @@ public final class SqlScriptImportService implements AutoCloseable {
             }
         }
         return new ArrayList<FieldSchema>(merged.values());
+    }
+
+    private List<FieldSchema> deduplicateColumnsIgnoreCase(List<FieldSchema> columns) {
+        if (columns == null || columns.isEmpty()) {
+            return columns;
+        }
+        LinkedHashMap<String, FieldSchema> deduped = new LinkedHashMap<String, FieldSchema>();
+        for (FieldSchema field : columns) {
+            if (field == null || field.getName() == null || field.getName().trim().isEmpty()) {
+                continue;
+            }
+            String key = field.getName().trim().toLowerCase(Locale.ROOT);
+            if (!deduped.containsKey(key)) {
+                deduped.put(key, field);
+            }
+        }
+        return new ArrayList<FieldSchema>(deduped.values());
+    }
+
+    private String renderPlaceholderProjection(List<FieldSchema> columns) {
+        List<String> rendered = new ArrayList<String>();
+        if (columns != null) {
+            for (FieldSchema column : columns) {
+                if (column == null || column.getName() == null || column.getName().trim().isEmpty()) {
+                    continue;
+                }
+                String type = column.getType() == null || column.getType().trim().isEmpty()
+                        ? "string"
+                        : column.getType().trim();
+                rendered.add("CAST(NULL AS " + type + ") AS " + quotedIdentifier(column.getName()));
+            }
+        }
+        if (rendered.isEmpty()) {
+            rendered.add("CAST(NULL AS string) AS " + quotedIdentifier("_placeholder_col"));
+        }
+        return String.join(", ", rendered);
     }
 
     private List<FieldSchema> deriveColumnsFromSql(String sqlText, TableRef tableRef) {
@@ -1407,6 +1448,17 @@ public final class SqlScriptImportService implements AutoCloseable {
         return null;
     }
 
+    private static int parseInt(String value, int defaultValue) {
+        if (value == null || value.trim().isEmpty()) {
+            return defaultValue;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException error) {
+            return defaultValue;
+        }
+    }
+
     private static void applySparkOverrides(SparkSession.Builder builder) {
         for (Map.Entry<String, String> entry : prefixedProperties(SPARK_CONF_PREFIX).entrySet()) {
             builder.config(entry.getKey(), entry.getValue());
@@ -1471,73 +1523,6 @@ public final class SqlScriptImportService implements AutoCloseable {
         }
     }
 
-    public static final class ImportSummary {
-        private final Path scriptPath;
-        private long startedAtEpochMs;
-        private long finishedAtEpochMs;
-        private int totalStatements;
-        private int skippedStatements;
-        private int importedStatements;
-        private int failedStatements;
-        private final List<String> importedEvents = new ArrayList<>();
-        private final List<String> failures = new ArrayList<>();
-
-        private ImportSummary(Path scriptPath) {
-            this.scriptPath = scriptPath;
-        }
-
-        public Path getScriptPath() {
-            return scriptPath;
-        }
-
-        public int getTotalStatements() {
-            return totalStatements;
-        }
-
-        public int getSkippedStatements() {
-            return skippedStatements;
-        }
-
-        public int getImportedStatements() {
-            return importedStatements;
-        }
-
-        public int getFailedStatements() {
-            return failedStatements;
-        }
-
-        public long getStartedAtEpochMs() {
-            return startedAtEpochMs;
-        }
-
-        public long getFinishedAtEpochMs() {
-            return finishedAtEpochMs;
-        }
-
-        public long getDurationMs() {
-            if (startedAtEpochMs <= 0 || finishedAtEpochMs <= 0) {
-                return -1L;
-            }
-            return finishedAtEpochMs - startedAtEpochMs;
-        }
-
-        public List<String> getImportedEvents() {
-            return new ArrayList<>(importedEvents);
-        }
-
-        public List<String> getFailures() {
-            return new ArrayList<>(failures);
-        }
-
-        private void markStarted() {
-            startedAtEpochMs = System.currentTimeMillis();
-        }
-
-        private void markFinished() {
-            finishedAtEpochMs = System.currentTimeMillis();
-        }
-    }
-
     private static final class AnalysisBundle {
         private final LogicalPlan logicalPlan;
         private final LogicalPlan analyzedPlan;
@@ -1551,16 +1536,13 @@ public final class SqlScriptImportService implements AutoCloseable {
     }
 
     private static final class PreparedImport {
-        private final ImportSummary summary;
         private final List<ExecutionCaptureEvent> events;
         private final List<NormalizedLineageResult> results;
 
         private PreparedImport(
-                ImportSummary summary,
                 List<ExecutionCaptureEvent> events,
                 List<NormalizedLineageResult> results
         ) {
-            this.summary = summary;
             this.events = events;
             this.results = results;
         }
@@ -1570,112 +1552,6 @@ public final class SqlScriptImportService implements AutoCloseable {
         private final List<String> syncedTables = new ArrayList<String>();
         private final List<String> failedTables = new ArrayList<String>();
         private final List<String> failures = new ArrayList<String>();
-    }
-
-    public static final class DirectoryImportSummary {
-        private final Path directoryPath;
-        private long startedAtEpochMs;
-        private long finishedAtEpochMs;
-        private int totalScripts;
-        private int successfulScripts;
-        private int partialScripts;
-        private int failedScripts;
-        private int skippedScripts;
-        private int totalStatements;
-        private int skippedStatements;
-        private int importedStatements;
-        private int failedStatements;
-        private final List<ImportSummary> fileSummaries = new ArrayList<>();
-
-        private DirectoryImportSummary(Path directoryPath) {
-            this.directoryPath = directoryPath;
-        }
-
-        private void add(ImportSummary summary) {
-            fileSummaries.add(summary);
-            totalScripts++;
-            totalStatements += summary.getTotalStatements();
-            skippedStatements += summary.getSkippedStatements();
-            importedStatements += summary.getImportedStatements();
-            failedStatements += summary.getFailedStatements();
-
-            if (summary.getImportedStatements() == 0 && summary.getFailedStatements() == 0) {
-                skippedScripts++;
-            } else if (summary.getFailedStatements() > 0 && summary.getImportedStatements() > 0) {
-                partialScripts++;
-            } else if (summary.getFailedStatements() > 0) {
-                failedScripts++;
-            } else {
-                successfulScripts++;
-            }
-        }
-
-        public Path getDirectoryPath() {
-            return directoryPath;
-        }
-
-        public int getTotalScripts() {
-            return totalScripts;
-        }
-
-        public int getSuccessfulScripts() {
-            return successfulScripts;
-        }
-
-        public int getPartialScripts() {
-            return partialScripts;
-        }
-
-        public int getFailedScripts() {
-            return failedScripts;
-        }
-
-        public int getSkippedScripts() {
-            return skippedScripts;
-        }
-
-        public int getTotalStatements() {
-            return totalStatements;
-        }
-
-        public int getSkippedStatements() {
-            return skippedStatements;
-        }
-
-        public int getImportedStatements() {
-            return importedStatements;
-        }
-
-        public int getFailedStatements() {
-            return failedStatements;
-        }
-
-        public long getStartedAtEpochMs() {
-            return startedAtEpochMs;
-        }
-
-        public long getFinishedAtEpochMs() {
-            return finishedAtEpochMs;
-        }
-
-        public long getDurationMs() {
-            if (startedAtEpochMs <= 0 || finishedAtEpochMs <= 0) {
-                return -1L;
-            }
-            return finishedAtEpochMs - startedAtEpochMs;
-        }
-
-        public List<ImportSummary> getFileSummaries() {
-            return new ArrayList<>(fileSummaries);
-        }
-
-        private void markStarted() {
-            startedAtEpochMs = System.currentTimeMillis();
-        }
-
-        private void markFinished() {
-            finishedAtEpochMs = System.currentTimeMillis();
-        }
     }
 
     public static final class MetadataSyncSummary {

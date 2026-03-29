@@ -492,7 +492,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
             ResolutionContext resolutionContext
     ) {
         String operatorInstanceId = registerOperatorInstance(event, scopeNodeId, path, scopePlan, null, builder);
-        List<TargetExpression> outputs = tryCollectTargetExpressions(scopePlan, resolutionContext);
+        List<TargetExpression> outputs = resolveScopeTargetExpressions(scopePlan, ownerId, resolutionContext);
         for (int i = 0; i < outputs.size(); i++) {
             TargetExpression output = outputs.get(i);
             ColumnNode scopedOutput = buildScopeOutputColumn(ownerId, output, i);
@@ -522,6 +522,36 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                     resolutionContext
             );
         }
+    }
+
+    private List<TargetExpression> resolveScopeTargetExpressions(
+            LogicalPlan scopePlan,
+            String ownerId,
+            ResolutionContext resolutionContext
+    ) {
+        List<List<TargetExpression>> candidates = new ArrayList<>();
+        addCandidate(candidates, tryCollectTargetExpressions(scopePlan, resolutionContext));
+        if (ownerId != null && !ownerId.trim().isEmpty() && resolutionContext != null) {
+            Optional<LogicalPlan> namedPlan = resolutionContext.resolveNamedPlan(Collections.singletonList(ownerId));
+            if (namedPlan.isPresent() && namedPlan.get() != scopePlan) {
+                addCandidate(candidates, tryCollectTargetExpressions(namedPlan.get(), resolutionContext));
+            }
+        }
+        if (candidates.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        List<TargetExpression> best = candidates.get(0);
+        int bestScore = scoreTargetExpressions(best);
+        for (int i = 1; i < candidates.size(); i++) {
+            List<TargetExpression> candidate = candidates.get(i);
+            int score = scoreTargetExpressions(candidate);
+            if (score > bestScore) {
+                best = candidate;
+                bestScore = score;
+            }
+        }
+        return best;
     }
 
     private ColumnNode buildScopeOutputColumn(String ownerId, TargetExpression targetExpression, int index) {
@@ -1013,6 +1043,10 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
         int score = 0;
         for (TargetExpression target : targets) {
             Expression expression = target.getExpression();
+            if (isPlaceholderExpression(expression)) {
+                score -= 100;
+                continue;
+            }
             if (!(expression instanceof AttributeReference)) {
                 score += 10;
                 continue;
@@ -1021,6 +1055,22 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
             score += qualifier.isEmpty() ? 0 : 2;
         }
         return score;
+    }
+
+    private boolean isPlaceholderExpression(Expression expression) {
+        if (expression == null) {
+            return true;
+        }
+        if (expression instanceof Alias) {
+            return isPlaceholderExpression(((Alias) expression).child());
+        }
+        if (expression instanceof Cast) {
+            return isPlaceholderExpression(((Cast) expression).child());
+        }
+        if (expression instanceof Literal) {
+            return ((Literal) expression).value() == null;
+        }
+        return false;
     }
 
     private ResolutionContext buildResolutionContext(LogicalPlan logicalPlan, LogicalPlan analyzedPlan, LogicalPlan optimizedPlan) {
@@ -1109,9 +1159,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
             return;
         }
         String normalized = normalizeIdentifierToken(name);
-        if (!namedPlans.containsKey(normalized)) {
-            namedPlans.put(normalized, plan);
-        }
+        namedPlans.put(normalized, plan);
     }
 
     private List<Tuple2<String, LogicalPlan>> extractCteRelations(LogicalPlan plan) {

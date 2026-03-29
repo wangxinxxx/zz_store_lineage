@@ -72,7 +72,33 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
         flushStatements(statements);
     }
 
-    private List<String> buildCaptureStatements(ExecutionCaptureEvent event) {
+    public void executeStatements(List<String> statements) {
+        ensureInitialized();
+        executeAll(statements == null ? new ArrayList<String>() : statements);
+    }
+
+    public static List<String> buildBatchStatements(List<ExecutionCaptureEvent> events, List<NormalizedLineageResult> results) {
+        List<String> statements = new ArrayList<String>();
+        if (events != null) {
+            for (ExecutionCaptureEvent event : events) {
+                if (event == null) {
+                    continue;
+                }
+                statements.addAll(buildCaptureStatements(event));
+            }
+        }
+        if (results != null) {
+            for (NormalizedLineageResult result : results) {
+                if (result == null) {
+                    continue;
+                }
+                statements.addAll(buildLineageStatements(result));
+            }
+        }
+        return statements;
+    }
+
+    public static List<String> buildCaptureStatements(ExecutionCaptureEvent event) {
         List<String> statements = new ArrayList<String>();
         String captureVid = captureVid(event.getEventId());
         statements.add(upsertCaptureEventVertex(event));
@@ -114,7 +140,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
         return statements;
     }
 
-    private List<String> buildLineageStatements(NormalizedLineageResult result) {
+    public static List<String> buildLineageStatements(NormalizedLineageResult result) {
         List<String> statements = new ArrayList<String>();
         Set<String> writtenNodeIds = new LinkedHashSet<>();
         String captureVid = captureVid(result.getEventId());
@@ -731,7 +757,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
         }
     }
 
-    private String upsertTaskVertex(ExecutionCaptureEvent event) {
+    private static String upsertTaskVertex(ExecutionCaptureEvent event) {
         String taskId = event.getTaskContext().getTaskId();
         return "INSERT VERTEX IF NOT EXISTS `task_node`(`task_name`, `owner`, `script_path`, `biz_date`) VALUES "
                 + quoteVid(taskVid(taskId))
@@ -743,7 +769,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 + ");";
     }
 
-    private String upsertRunVertex(ExecutionCaptureEvent event) {
+    private static String upsertRunVertex(ExecutionCaptureEvent event) {
         String runId = event.getTaskContext().getRunId();
         return "INSERT VERTEX IF NOT EXISTS `run_node`(`run_id`, `biz_date`) VALUES "
                 + quoteVid(runVid(runId))
@@ -753,7 +779,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 + ");";
     }
 
-    private String upsertCaptureEventVertex(ExecutionCaptureEvent event) {
+    private static String upsertCaptureEventVertex(ExecutionCaptureEvent event) {
         return "INSERT VERTEX IF NOT EXISTS `capture_event`(`func_name`, `status`, `capture_time`, `statement_type`, `error_message`) VALUES "
                 + quoteVid(captureVid(event.getEventId()))
                 + ":("
@@ -765,7 +791,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 + ");";
     }
 
-    private String upsertCaptureEventVertex(NormalizedLineageResult result) {
+    private static String upsertCaptureEventVertex(NormalizedLineageResult result) {
         return "INSERT VERTEX IF NOT EXISTS `capture_event`(`func_name`, `status`, `capture_time`, `statement_type`, `error_message`) VALUES "
                 + quoteVid(captureVid(result.getEventId()))
                 + ":("
@@ -777,7 +803,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 + ");";
     }
 
-    private String updateCaptureEventVertex(NormalizedLineageResult result) {
+    private static String updateCaptureEventVertex(NormalizedLineageResult result) {
         return "UPDATE VERTEX ON `capture_event` "
                 + quoteVid(captureVid(result.getEventId()))
                 + " SET "
@@ -787,7 +813,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 + ";";
     }
 
-    private String upsertTableVertex(TableRef tableRef) {
+    private static String upsertTableVertex(TableRef tableRef) {
         return "INSERT VERTEX IF NOT EXISTS `table_node`(`normalized_name`, `catalog_name`, `database_name`, `table_name`, `source_type`) VALUES "
                 + quoteVid(tableVid(tableRef))
                 + ":("
@@ -799,7 +825,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 + ");";
     }
 
-    private String upsertColumnVertex(ColumnNode columnNode) {
+    private static String upsertColumnVertex(ColumnNode columnNode) {
         return "INSERT VERTEX IF NOT EXISTS `column_node`(`column_name`, `owner_id`, `owner_type`, `data_type`, `qualifier`) VALUES "
                 + quoteVid(columnNode.getNodeId())
                 + ":("
@@ -811,7 +837,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 + ");";
     }
 
-    private String upsertExpressionVertex(ExpressionNode expressionNode) {
+    private static String upsertExpressionVertex(ExpressionNode expressionNode) {
         return "INSERT VERTEX IF NOT EXISTS `expression_node`(`expression_type`, `expression_sql`, `normalized_expression`) VALUES "
                 + quoteVid(expressionNode.getNodeId())
                 + ":("
@@ -821,7 +847,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 + ");";
     }
 
-    private String upsertScopeVertex(ScopeNode scopeNode) {
+    private static String upsertScopeVertex(ScopeNode scopeNode) {
         return "INSERT VERTEX IF NOT EXISTS `scope_node`(`scope_name`, `scope_type`, `parent_scope_id`, `plan_node_name`) VALUES "
                 + quoteVid(scopeNode.getNodeId())
                 + ":("
@@ -832,7 +858,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 + ");";
     }
 
-    private String upsertLiteralVertex(LiteralNode literalNode) {
+    private static String upsertLiteralVertex(LiteralNode literalNode) {
         return "INSERT VERTEX IF NOT EXISTS `literal_node`(`literal_type`, `literal_value`, `normalized_value`) VALUES "
                 + quoteVid(literalNode.getNodeId())
                 + ":("
@@ -842,7 +868,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 + ");";
     }
 
-    private String upsertOperatorInstanceVertex(OperatorInstanceNode operatorInstanceNode) {
+    private static String upsertOperatorInstanceVertex(OperatorInstanceNode operatorInstanceNode) {
         return "INSERT VERTEX IF NOT EXISTS `operator_instance_node`(`scope_id`, `operator_type`, `operator_sub_type`, `operator_path`, `parent_operator_id`, `plan_node_name`) VALUES "
                 + quoteVid(operatorInstanceNode.getNodeId())
                 + ":("
@@ -855,7 +881,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 + ");";
     }
 
-    private String upsertColumnInstanceVertex(ColumnInstanceNode columnInstanceNode) {
+    private static String upsertColumnInstanceVertex(ColumnInstanceNode columnInstanceNode) {
         return "INSERT VERTEX IF NOT EXISTS `column_instance_node`(`column_id`, `column_name`, `scope_id`, `relation_instance_id`, `instance_type`, `data_type`, `ordinal`) VALUES "
                 + quoteVid(columnInstanceNode.getNodeId())
                 + ":("
@@ -869,7 +895,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 + ");";
     }
 
-    private String upsertRelationInstanceVertex(RelationInstanceNode relationInstanceNode) {
+    private static String upsertRelationInstanceVertex(RelationInstanceNode relationInstanceNode) {
         return "INSERT VERTEX IF NOT EXISTS `relation_instance_node`(`instance_name`, `scope_id`, `source_table_id`, `source_type`, `alias_name`, `plan_node_name`) VALUES "
                 + quoteVid(relationInstanceNode.getNodeId())
                 + ":("
@@ -882,7 +908,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 + ");";
     }
 
-    private String upsertPredicateVertex(PredicateNode predicateNode) {
+    private static String upsertPredicateVertex(PredicateNode predicateNode) {
         return "INSERT VERTEX IF NOT EXISTS `predicate_node`(`predicate_type`, `predicate_sql`, `normalized_predicate`, `scope_id`, `plan_node_name`) VALUES "
                 + quoteVid(predicateNode.getNodeId())
                 + ":("
@@ -894,7 +920,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 + ");";
     }
 
-    private String insertEdge(String edgeName, String srcVid, String dstVid, long rank, String... values) {
+    private static String insertEdge(String edgeName, String srcVid, String dstVid, long rank, String... values) {
         return "INSERT EDGE IF NOT EXISTS `" + edgeName + "` VALUES "
                 + quoteVid(srcVid)
                 + "->"
@@ -906,7 +932,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 + ");";
     }
 
-    private String upsertEdge(String edgeName, String srcVid, String dstVid, long rank, String... values) {
+    private static String upsertEdge(String edgeName, String srcVid, String dstVid, long rank, String... values) {
         return "INSERT EDGE `" + edgeName + "` VALUES "
                 + quoteVid(srcVid)
                 + "->"
@@ -918,11 +944,11 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 + ");";
     }
 
-    private String insertEdgeIfNotExists(String edgeName, String srcVid, String dstVid, long rank, String... values) {
+    private static String insertEdgeIfNotExists(String edgeName, String srcVid, String dstVid, long rank, String... values) {
         return insertEdge(edgeName, srcVid, dstVid, rank, values);
     }
 
-    private List<String> buildSemanticLineageEdges(NormalizedLineageResult result, LineageGraphEdge graphEdge) {
+    private static List<String> buildSemanticLineageEdges(NormalizedLineageResult result, LineageGraphEdge graphEdge) {
         String eventId = graphEdge.getEventId() == null ? result.getEventId() : graphEdge.getEventId();
         String taskId = inferTaskId(result);
         String runId = inferRunId(result);
@@ -1431,7 +1457,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
         }
     }
 
-    private List<String> structuralEdges(
+    private static List<String> structuralEdges(
             String edgeName,
             String srcVid,
             String dstVid,
@@ -1452,7 +1478,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
         return statements;
     }
 
-    private List<String> buildDependencyEdges(
+    private static List<String> buildDependencyEdges(
             String factEdgeName,
             String latestEdgeName,
             String srcVid,
@@ -1490,7 +1516,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
         return statements;
     }
 
-    private List<String> buildLatestFlowEdge(
+    private static List<String> buildLatestFlowEdge(
             String latestEdgeName,
             String srcVid,
             String dstVid,
@@ -1514,7 +1540,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
         );
     }
 
-    private List<String> buildLatestSemanticEdge(
+    private static List<String> buildLatestSemanticEdge(
             String factEdgeName,
             String latestEdgeName,
             String srcVid,
@@ -1552,7 +1578,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
         return statements;
     }
 
-    private List<String> mergeStatements(List<String>... statementGroups) {
+    private static List<String> mergeStatements(List<String>... statementGroups) {
         List<String> merged = new ArrayList<>();
         for (List<String> statements : statementGroups) {
             merged.addAll(statements);
@@ -1560,21 +1586,21 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
         return merged;
     }
 
-    private List<String> replaceLatestEdge(String edgeName, String srcVid, String dstVid, String... values) {
+    private static List<String> replaceLatestEdge(String edgeName, String srcVid, String dstVid, String... values) {
         return replaceLatestEdge(edgeName, srcVid, dstVid, 0L, values);
     }
 
-    private List<String> replaceLatestEdge(String edgeName, String srcVid, String dstVid, long rank, String... values) {
+    private static List<String> replaceLatestEdge(String edgeName, String srcVid, String dstVid, long rank, String... values) {
         List<String> statements = new ArrayList<>(1);
         statements.add(upsertEdge(edgeName, srcVid, dstVid, rank, values));
         return statements;
     }
 
-    private long latestSemanticRank(String edgeName, String role) {
+    private static long latestSemanticRank(String edgeName, String role) {
         return edgeRank(edgeName, role == null ? "" : role);
     }
 
-    private String inferTaskId(NormalizedLineageResult result) {
+    private static String inferTaskId(NormalizedLineageResult result) {
         for (TableLineageEdge tableEdge : result.getTableEdges()) {
             if (tableEdge.getTaskId() != null && !tableEdge.getTaskId().isEmpty()) {
                 return tableEdge.getTaskId();
@@ -1583,7 +1609,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
         return null;
     }
 
-    private String inferRunId(NormalizedLineageResult result) {
+    private static String inferRunId(NormalizedLineageResult result) {
         for (TableLineageEdge tableEdge : result.getTableEdges()) {
             if (tableEdge.getRunId() != null && !tableEdge.getRunId().isEmpty()) {
                 return tableEdge.getRunId();
@@ -1592,7 +1618,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
         return null;
     }
 
-    private String tableOwnerVid(ColumnNode columnNode) {
+    private static String tableOwnerVid(ColumnNode columnNode) {
         if (columnNode.getOwnerId() == null || columnNode.getOwnerId().isEmpty()) {
             return null;
         }
@@ -1602,39 +1628,39 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
         return null;
     }
 
-    private String taskVid(String taskId) {
+    private static String taskVid(String taskId) {
         return "task:" + taskId;
     }
 
-    private String runVid(String runId) {
+    private static String runVid(String runId) {
         return "run:" + runId;
     }
 
-    private String captureVid(String eventId) {
+    private static String captureVid(String eventId) {
         return "capture:" + eventId;
     }
 
-    private String tableVid(TableRef tableRef) {
+    private static String tableVid(TableRef tableRef) {
         return "table:" + tableRef.normalizedName();
     }
 
-    private String quoteVid(String value) {
+    private static String quoteVid(String value) {
         return quote(value);
     }
 
-    private String quote(String value) {
+    private static String quote(String value) {
         return "\"" + escape(value == null ? "" : value) + "\"";
     }
 
-    private String nullableQuote(String value) {
+    private static String nullableQuote(String value) {
         return value == null ? "NULL" : quote(value);
     }
 
-    private String quoteLong(long value) {
+    private static String quoteLong(long value) {
         return String.valueOf(value);
     }
 
-    private String escape(String value) {
+    private static String escape(String value) {
         return value
                 .replace("\\", "\\\\")
                 .replace("\"", "\\\"")
@@ -1643,7 +1669,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 .replace("\t", "\\t");
     }
 
-    private long edgeRank(String... values) {
+    private static long edgeRank(String... values) {
         String digest = HashUtils.sha1(String.join("|", values));
         String hex = digest.substring(0, 15);
         return Long.parseLong(hex, 16);

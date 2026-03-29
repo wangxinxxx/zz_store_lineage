@@ -1,8 +1,13 @@
 package com.zhuanzhuan.lineage.storage.nebula;
 
-public final class NebulaGraphConfig {
+import java.io.Serializable;
+
+public final class NebulaGraphConfig implements Serializable {
+    private static final long serialVersionUID = 1L;
     public static final String HOST_PROPERTY = "zz.lineage.nebula.host";
     public static final String PORT_PROPERTY = "zz.lineage.nebula.port";
+    public static final String META_ADDRESS_PROPERTY = "zz.lineage.nebula.metaAddress";
+    public static final String GRAPH_ADDRESS_PROPERTY = "zz.lineage.nebula.graphAddress";
     public static final String USERNAME_PROPERTY = "zz.lineage.nebula.username";
     public static final String PASSWORD_PROPERTY = "zz.lineage.nebula.password";
     public static final String SPACE_PROPERTY = "zz.lineage.nebula.space";
@@ -12,6 +17,8 @@ public final class NebulaGraphConfig {
 
     public static final String HOST_ENV = "ZZ_LINEAGE_NEBULA_HOST";
     public static final String PORT_ENV = "ZZ_LINEAGE_NEBULA_PORT";
+    public static final String META_ADDRESS_ENV = "ZZ_LINEAGE_NEBULA_META_ADDRESS";
+    public static final String GRAPH_ADDRESS_ENV = "ZZ_LINEAGE_NEBULA_GRAPH_ADDRESS";
     public static final String USERNAME_ENV = "ZZ_LINEAGE_NEBULA_USERNAME";
     public static final String PASSWORD_ENV = "ZZ_LINEAGE_NEBULA_PASSWORD";
     public static final String SPACE_ENV = "ZZ_LINEAGE_NEBULA_SPACE";
@@ -21,6 +28,8 @@ public final class NebulaGraphConfig {
 
     private final String host;
     private final int port;
+    private final String metaAddress;
+    private final String graphAddress;
     private final String username;
     private final String password;
     private final String space;
@@ -31,6 +40,8 @@ public final class NebulaGraphConfig {
     public NebulaGraphConfig(
             String host,
             int port,
+            String metaAddress,
+            String graphAddress,
             String username,
             String password,
             String space,
@@ -40,6 +51,8 @@ public final class NebulaGraphConfig {
     ) {
         this.host = host;
         this.port = port;
+        this.metaAddress = metaAddress;
+        this.graphAddress = graphAddress;
         this.username = username;
         this.password = password;
         this.space = space;
@@ -49,9 +62,13 @@ public final class NebulaGraphConfig {
     }
 
     public static NebulaGraphConfig fromSystem() {
+        String host = read(HOST_PROPERTY, HOST_ENV, "192.168.152.128");
+        int port = parseInt(read(PORT_PROPERTY, PORT_ENV, "9669"), 9669);
         return new NebulaGraphConfig(
-                read(HOST_PROPERTY, HOST_ENV, "127.0.0.1"),
-                parseInt(read(PORT_PROPERTY, PORT_ENV, "9669"), 9669),
+                host,
+                port,
+                read(META_ADDRESS_PROPERTY, META_ADDRESS_ENV, host + ":9559"),
+                read(GRAPH_ADDRESS_PROPERTY, GRAPH_ADDRESS_ENV, host + ":" + port),
                 read(USERNAME_PROPERTY, USERNAME_ENV, "root"),
                 read(PASSWORD_PROPERTY, PASSWORD_ENV, "nebula"),
                 read(SPACE_PROPERTY, SPACE_ENV, "store_lineage"),
@@ -67,6 +84,14 @@ public final class NebulaGraphConfig {
 
     public int getPort() {
         return port;
+    }
+
+    public String getMetaAddress() {
+        return metaAddress;
+    }
+
+    public String getGraphAddress() {
+        return graphAddress;
     }
 
     public String getUsername() {
