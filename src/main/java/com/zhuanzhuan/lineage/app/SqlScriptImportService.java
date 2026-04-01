@@ -17,10 +17,9 @@ import com.zhuanzhuan.lineage.storage.nebula.SparkNebulaConnectorImporter;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.plans.logical.InsertIntoStatement;
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan;
-import scala.Tuple2;
-import scala.collection.Seq;
 
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -35,7 +34,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -96,16 +94,33 @@ public final class SqlScriptImportService implements AutoCloseable {
         );
     }
 
+    public static SqlScriptImportService createParserOnly() throws IOException {
+        Path warehouseDir = Files.createTempDirectory("spark-script-parse-warehouse-");
+        SparkSession spark = createSparkSession(warehouseDir);
+        spark.sparkContext().setLogLevel("ERROR");
+        return new SqlScriptImportService(
+                spark,
+                new DefaultSparkLineageParser(),
+                null,
+                "sql_script_parser",
+                LocalDate.now().format(DATE_TOKEN),
+                new NebulaImporterBundleWriter(
+                        NebulaImporterBundleWriter.resolveBundleDirFromSystem(),
+                        NebulaGraphConfig.fromSystem(),
+                        NebulaImporterBundleWriter.ImporterOptions.fromSystem()
+                ),
+                null
+        );
+    }
+
     private static SparkSession createSparkSession(Path warehouseDir) {
         SparkSession.Builder builder = SparkSession.builder()
                 .appName("sql-script-import-service")
                 .master("local[1]")
-                .config("spark.ui.enabled", "false")
-                .config("spark.sql.shuffle.partitions", "1")
+                .config("spark.ui.enabled", "true")
                 .config("spark.sql.warehouse.dir", warehouseDir.toAbsolutePath().toString())
-                .config("spark.driver.host", "127.0.0.1")
-                .config("spark.driver.bindAddress", "127.0.0.1")
-                .config("spark.sql.legacy.createHiveTableByDefault", "false");
+                .config("hive.metastore.uris", "thrift://hive-metsatore2.58dns.org:9083");
+
         applySparkOverrides(builder);
         return builder.enableHiveSupport().getOrCreate();
     }
@@ -130,10 +145,15 @@ public final class SqlScriptImportService implements AutoCloseable {
     }
 
     public void clearStorage() {
-        storage.clear();
+        if (storage != null) {
+            storage.clear();
+        }
     }
 
     public NebulaImporterBundleWriter.BundleSummary exportImporterBundle(Path scriptPath) throws IOException {
+        if (bundleWriter == null) {
+            throw new IllegalStateException("Nebula bundle writer is not configured. Use createDefault() for Nebula export.");
+        }
         Path absolutePath = scriptPath.toAbsolutePath().normalize();
         if (Files.isDirectory(absolutePath)) {
             return exportImporterBundleDirectory(absolutePath);
@@ -143,11 +163,6 @@ public final class SqlScriptImportService implements AutoCloseable {
             bundleSession.appendScript(absolutePath, prepared.events, prepared.results);
             return bundleSession.finish();
         }
-    }
-
-    public SparkNebulaConnectorImporter.ImportSummary runSparkImportBundle(Path bundleDir) throws IOException {
-        stopActiveSparkSession();
-        return connectorImporter.importBundle(bundleDir);
     }
 
     private NebulaImporterBundleWriter.BundleSummary exportImporterBundleDirectory(Path directoryPath) throws IOException {
@@ -203,6 +218,7 @@ public final class SqlScriptImportService implements AutoCloseable {
                 bufferedEvents.add(event);
                 bufferedResults.add(result);
             } catch (Exception error) {
+                throw buildStatementFailure(absolutePath, lineageStatementIndex, renderedStatement, error);
             }
         }
         return new PreparedImport(bufferedEvents, bufferedResults);
@@ -245,21 +261,19 @@ public final class SqlScriptImportService implements AutoCloseable {
         LogicalPlan analysisPlan = insert == null
                 ? logicalPlan
                 : parsePlan(stripInsertClause(sql));
-        return executeAnalysis(logicalPlan, analysisPlan);
+        LogicalPlan analyzedPlan = analyzePlan(analysisPlan);
+        return new AnalysisBundle(logicalPlan, analyzedPlan, analyzedPlan);
     }
 
-    private AnalysisBundle executeAnalysis(LogicalPlan logicalPlan, LogicalPlan planToExecute) {
+    private LogicalPlan analyzePlan(LogicalPlan planToExecute) {
         Object sessionState = invokeNoArg(spark, "sessionState");
         Object queryExecution = invokeCompatibleOneArg(sessionState, "executePlan", planToExecute);
 
         if (queryExecution != null) {
             LogicalPlan analyzedPlan = asLogicalPlan(invokeNoArg(queryExecution, "analyzed"));
-            LogicalPlan optimizedPlan = asLogicalPlan(invokeNoArg(queryExecution, "optimizedPlan"));
-            return new AnalysisBundle(
-                    logicalPlan,
-                    analyzedPlan == null ? planToExecute : analyzedPlan,
-                    optimizedPlan == null ? (analyzedPlan == null ? planToExecute : analyzedPlan) : optimizedPlan
-            );
+            if (analyzedPlan != null) {
+                return analyzedPlan;
+            }
         }
 
         Object analyzer = invokeNoArg(sessionState, "analyzer");
@@ -268,22 +282,7 @@ public final class SqlScriptImportService implements AutoCloseable {
         if (analyzedPlan == null) {
             analyzedPlan = planToExecute;
         }
-
-        Object optimizer = invokeNoArg(sessionState, "optimizer");
-        Object optimized = invokeCompatibleOneArg(optimizer, "execute", analyzedPlan);
-        LogicalPlan optimizedPlan = asLogicalPlan(optimized);
-        if (optimizedPlan == null) {
-            optimizedPlan = analyzedPlan;
-        }
-        return new AnalysisBundle(logicalPlan, analyzedPlan, optimizedPlan);
-    }
-
-    private LogicalPlan unwrapAnalysisPlan(LogicalPlan logicalPlan) {
-        InsertIntoStatement insert = extractInsertStatement(logicalPlan);
-        if (insert != null) {
-            return insert.query();
-        }
-        return logicalPlan;
+        return analyzedPlan;
     }
 
     private String stripInsertClause(String sql) {
@@ -325,8 +324,9 @@ public final class SqlScriptImportService implements AutoCloseable {
 
     private ExecutionCaptureEvent buildEvent(Path scriptPath, int statementIndex, String statement, AnalysisBundle analysisBundle) {
         long captureTimeMs = System.currentTimeMillis();
-        String taskId = sanitizeTaskId(scriptPath.getFileName().toString()) + "_stmt_" + statementIndex;
-        String runId = sanitizeTaskId(scriptPath.getFileName().toString()) + "_import_run";
+        String scriptLabel = scriptLabel(scriptPath);
+        String taskId = sanitizeTaskId(scriptLabel) + "_stmt_" + statementIndex;
+        String runId = sanitizeTaskId(scriptLabel) + "_import_run";
         String eventId = "offline:" + HashUtils.sha1(scriptPath + "#" + statementIndex + "#" + statement);
 
         return new ExecutionCaptureEvent(
@@ -334,11 +334,11 @@ public final class SqlScriptImportService implements AutoCloseable {
                 ExecutionStatus.SUCCESS,
                 new LineageTaskContext(
                         taskId,
-                        scriptPath.getFileName().toString(),
+                        scriptLabel,
                         runId,
                         bizDateToken,
                         owner,
-                        scriptPath.toString()
+                        scriptLabel
                 ),
                 new SparkAppContext(
                         spark.sparkContext().applicationId(),
@@ -382,29 +382,6 @@ public final class SqlScriptImportService implements AutoCloseable {
         variables.put("sevendaysbeforesuffix", current.minusDays(7).format(DATE_TOKEN));
         variables.put("start_date", "20230101");
         return variables;
-    }
-
-    private List<String> renderLineageStatements(List<String> statements, Map<String, String> variables) {
-        List<String> renderedStatements = new ArrayList<String>();
-        if (statements == null) {
-            return renderedStatements;
-        }
-        LinkedHashMap<String, String> scopedVariables = new LinkedHashMap<String, String>(variables);
-        for (String rawStatement : statements) {
-            String statement = rawStatement == null ? "" : rawStatement.trim();
-            if (statement.isEmpty()) {
-                continue;
-            }
-            if (isSetStatement(statement)) {
-                registerSetVariable(scopedVariables, statement);
-                continue;
-            }
-            String renderedStatement = replacePlaceholders(statement, scopedVariables);
-            if (isLineageStatement(renderedStatement)) {
-                renderedStatements.add(renderedStatement);
-            }
-        }
-        return renderedStatements;
     }
 
     private boolean isSetStatement(String statement) {
@@ -562,8 +539,40 @@ public final class SqlScriptImportService implements AutoCloseable {
     }
 
     private String buildBatchName(Path path) {
-        String normalized = path.toAbsolutePath().normalize().toString();
-        return normalized.replaceAll("[^a-zA-Z0-9._-]", "_");
+        String label = sanitizeTaskId(scriptLabel(path));
+        String digest = HashUtils.sha1(path.toAbsolutePath().normalize().toString()).substring(0, 8);
+        if (label.length() > 32) {
+            label = label.substring(0, 32);
+        }
+        return label + "_" + digest;
+    }
+
+    private String scriptLabel(Path path) {
+        if (path == null) {
+            return "unknown";
+        }
+        Path fileName = path.getFileName();
+        if (fileName == null) {
+            return "unknown";
+        }
+        String label = fileName.toString().trim();
+        return label.isEmpty() ? "unknown" : label;
+    }
+
+    private IllegalStateException buildStatementFailure(Path scriptPath, int statementIndex, String statement, Throwable error) {
+        Throwable rootCause = rootCause(error);
+        Throwable displayError = rootCause == null ? error : rootCause;
+        String message = "Failed to analyze SQL statement #"
+                + statementIndex
+                + " in "
+                + scriptLabel(scriptPath)
+                + ": "
+                + displayError
+                + System.lineSeparator()
+                + "SQL:"
+                + System.lineSeparator()
+                + statement;
+        return new IllegalStateException(message, rootCause == null ? error : rootCause);
     }
 
     private Object invokeNoArg(Object target, String methodName) {
@@ -571,17 +580,13 @@ public final class SqlScriptImportService implements AutoCloseable {
             throw new IllegalStateException("Target is null for method " + methodName);
         }
         try {
-            Method method = target.getClass().getMethod(methodName);
-            method.setAccessible(true);
-            return method.invoke(target);
-        } catch (Exception ignored) {
+            return invokeMethod(target, target.getClass().getMethod(methodName));
+        } catch (NoSuchMethodException ignored) {
         }
         try {
-            Method method = target.getClass().getDeclaredMethod(methodName);
-            method.setAccessible(true);
-            return method.invoke(target);
+            return invokeMethod(target, target.getClass().getDeclaredMethod(methodName));
         } catch (Exception error) {
-            throw new IllegalStateException("Failed to invoke method `" + methodName + "` on " + target.getClass().getName(), error);
+            throw reflectionFailure(target, methodName, error);
         }
     }
 
@@ -590,17 +595,13 @@ public final class SqlScriptImportService implements AutoCloseable {
             throw new IllegalStateException("Target is null for method " + methodName);
         }
         try {
-            Method method = target.getClass().getMethod(methodName, argumentType);
-            method.setAccessible(true);
-            return method.invoke(target, argumentValue);
-        } catch (Exception ignored) {
+            return invokeMethod(target, target.getClass().getMethod(methodName, argumentType), argumentValue);
+        } catch (NoSuchMethodException ignored) {
         }
         try {
-            Method method = target.getClass().getDeclaredMethod(methodName, argumentType);
-            method.setAccessible(true);
-            return method.invoke(target, argumentValue);
+            return invokeMethod(target, target.getClass().getDeclaredMethod(methodName, argumentType), argumentValue);
         } catch (Exception error) {
-            throw new IllegalStateException("Failed to invoke method `" + methodName + "` on " + target.getClass().getName(), error);
+            throw reflectionFailure(target, methodName, error);
         }
     }
 
@@ -619,29 +620,6 @@ public final class SqlScriptImportService implements AutoCloseable {
             return result;
         }
         throw new IllegalStateException("Failed to invoke compatible method `" + methodName + "` on " + target.getClass().getName());
-    }
-
-    private List<LogicalPlan> extractCteRelationPlans(LogicalPlan plan) {
-        Object relations;
-        try {
-            relations = invokeNoArg(plan, "cteRelations");
-        } catch (Exception ignored) {
-            return Collections.emptyList();
-        }
-        if (!(relations instanceof Seq)) {
-            return Collections.emptyList();
-        }
-        List<LogicalPlan> plans = new ArrayList<LogicalPlan>();
-        for (Object value : ScalaInterop.toJavaList((Seq<?>) relations)) {
-            if (!(value instanceof Tuple2)) {
-                continue;
-            }
-            Object relationPlan = ((Tuple2<?, ?>) value)._2();
-            if (relationPlan instanceof LogicalPlan) {
-                plans.add((LogicalPlan) relationPlan);
-            }
-        }
-        return plans;
     }
 
     private LogicalPlan extractTransparentChildPlan(Object target) {
@@ -666,36 +644,36 @@ public final class SqlScriptImportService implements AutoCloseable {
             if (argumentValue != null && !parameterType.isInstance(argumentValue) && !parameterType.isAssignableFrom(argumentValue.getClass())) {
                 continue;
             }
-            try {
-                method.setAccessible(true);
-                return method.invoke(target, argumentValue);
-            } catch (Exception ignored) {
-            }
+            return invokeMethod(target, method, argumentValue);
         }
         return null;
     }
 
-    private static String read(String propertyKey, String envKey) {
-        String property = System.getProperty(propertyKey);
-        if (property != null && !property.trim().isEmpty()) {
-            return property.trim();
-        }
-        String env = System.getenv(envKey);
-        if (env != null && !env.trim().isEmpty()) {
-            return env.trim();
-        }
-        return null;
-    }
-
-    private static int parseInt(String value, int defaultValue) {
-        if (value == null || value.trim().isEmpty()) {
-            return defaultValue;
-        }
+    private Object invokeMethod(Object target, Method method, Object... arguments) {
         try {
-            return Integer.parseInt(value.trim());
-        } catch (NumberFormatException error) {
-            return defaultValue;
+            method.setAccessible(true);
+            return method.invoke(target, arguments);
+        } catch (InvocationTargetException error) {
+            throw reflectionFailure(target, method.getName(), error.getCause() == null ? error : error.getCause());
+        } catch (Exception error) {
+            throw reflectionFailure(target, method.getName(), error);
         }
+    }
+
+    private IllegalStateException reflectionFailure(Object target, String methodName, Throwable error) {
+        Throwable cause = error instanceof InvocationTargetException && ((InvocationTargetException) error).getCause() != null
+                ? ((InvocationTargetException) error).getCause()
+                : error;
+        return new IllegalStateException(
+                "Failed to invoke method `"
+                        + methodName
+                        + "` on "
+                        + target.getClass().getName()
+                        + (cause == null || cause.getMessage() == null || cause.getMessage().trim().isEmpty()
+                        ? ""
+                        : ": " + cause.getMessage()),
+                cause == null ? error : cause
+        );
     }
 
     private static void applySparkOverrides(SparkSession.Builder builder) {
@@ -745,6 +723,14 @@ public final class SqlScriptImportService implements AutoCloseable {
                     .sorted(Comparator.comparing(Path::toString))
                     .collect(Collectors.toList());
         }
+    }
+
+    private Throwable rootCause(Throwable error) {
+        Throwable current = error;
+        while (current != null && current.getCause() != null && current.getCause() != current) {
+            current = current.getCause();
+        }
+        return current;
     }
 
     private static final class AnalysisBundle {

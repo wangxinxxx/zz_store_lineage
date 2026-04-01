@@ -129,6 +129,12 @@ object SparkConnectorImportSupport {
                 s"import.finish $labelPrefix=${task.name} durationMs=${System.currentTimeMillis() - startedAt}"
               )
               task
+            } catch {
+              case error: Exception =>
+                println(
+                  s"import.error $labelPrefix=${task.name} path=${task.csvPath} message=${rootMessage(error)}"
+                )
+                throw error
             } finally {
               session.sparkContext.setLocalProperty("spark.scheduler.pool", null)
             }
@@ -172,4 +178,18 @@ object SparkConnectorImportSupport {
 
   private def sanitize(name: String): String =
     name.toLowerCase.replaceAll("[^a-z0-9]+", "_")
+
+  private def rootMessage(error: Throwable): String = {
+    var current = error
+    while (current != null && current.getCause != null && (current.getCause ne current)) {
+      current = current.getCause
+    }
+    if (current == null) {
+      "unknown"
+    } else if (current.getMessage == null || current.getMessage.trim.isEmpty) {
+      current.getClass.getName
+    } else {
+      s"${current.getClass.getName}: ${current.getMessage}"
+    }
+  }
 }

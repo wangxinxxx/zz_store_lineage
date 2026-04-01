@@ -25,7 +25,6 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -397,7 +396,6 @@ public final class NebulaImporterBundleWriter {
         private final Path verticesDir;
         private final Path edgesDir;
         private final long startedAtMs = System.currentTimeMillis();
-        private final List<String> scriptLines = new ArrayList<String>();
         private final Map<String, RecordStore> vertexStores = new LinkedHashMap<String, RecordStore>();
         private final Map<String, RecordStore> edgeStores = new LinkedHashMap<String, RecordStore>();
         private boolean closed;
@@ -416,8 +414,6 @@ public final class NebulaImporterBundleWriter {
 
         public void appendScript(Path scriptPath, List<ExecutionCaptureEvent> events, List<NormalizedLineageResult> results) {
             ensureOpen();
-            int verticesBefore = totalVertices;
-            int edgesBefore = totalEdges;
             totalScripts++;
             totalEvents += sizeOf(events);
             totalResults += sizeOf(results);
@@ -436,15 +432,6 @@ public final class NebulaImporterBundleWriter {
                     }
                 }
             }
-
-            String normalizedPath = scriptPath == null ? "" : scriptPath.toAbsolutePath().normalize().toString();
-            scriptLines.add(
-                    normalizedPath + "\t"
-                            + sizeOf(events) + "\t"
-                            + sizeOf(results) + "\t"
-                            + (totalVertices - verticesBefore) + "\t"
-                            + (totalEdges - edgesBefore)
-            );
         }
 
         public BundleSummary finish() throws IOException {
@@ -452,18 +439,14 @@ public final class NebulaImporterBundleWriter {
                 return finalSummary;
             }
             writeCsvFiles();
-            writeImporterConfig();
-            writeSchemaFile();
-            writeRunScripts();
-            writeScriptsFile();
             writeManifest();
             closed = true;
             finalSummary = new BundleSummary(
                     bundleDir,
-                    bundleDir.resolve(IMPORTER_CONFIG_FILE_NAME),
-                    bundleDir.resolve(SCHEMA_FILE_NAME),
-                    bundleDir.resolve(RUN_PS1_FILE_NAME),
-                    bundleDir.resolve(RUN_SH_FILE_NAME),
+                    null,
+                    null,
+                    null,
+                    null,
                     totalScripts,
                     totalEvents,
                     totalResults,
@@ -1058,144 +1041,8 @@ public final class NebulaImporterBundleWriter {
             }
         }
 
-        private void writeImporterConfig() throws IOException {
-            List<String> lines = new ArrayList<String>();
-            lines.add("client:");
-            lines.add("  version: v3");
-            lines.add("  address: " + yamlQuote(graphConfig.getHost() + ":" + graphConfig.getPort()));
-            lines.add("  user: " + yamlQuote(graphConfig.getUsername()));
-            lines.add("  password: " + yamlQuote(graphConfig.getPassword()));
-            lines.add("  concurrencyPerAddress: " + importerOptions.clientConcurrencyPerAddress);
-            lines.add("  retry: " + importerOptions.retry);
-            lines.add("  retryInitialInterval: 1s");
-            lines.add("manager:");
-            lines.add("  spaceName: " + yamlQuote(graphConfig.getSpace()));
-            lines.add("  batch: " + importerOptions.batch);
-            lines.add("  readerConcurrency: " + importerOptions.readerConcurrency);
-            lines.add("  importerConcurrency: " + importerOptions.importerConcurrency);
-            lines.add("  statsInterval: " + yamlQuote(importerOptions.statsInterval));
-            lines.add("  hooks:");
-            lines.add("    before:");
-            lines.add("      - statements:");
-            lines.add("          - |");
-            lines.add("              " + createSpaceStatement());
-            lines.add("        wait: 10s");
-            lines.add("      - statements:");
-            lines.add("          - |");
-            lines.add("              USE `" + graphConfig.getSpace() + "`;");
-            for (String statement : schemaStatements()) {
-                lines.add("              " + statement);
-            }
-            lines.add("        wait: 10s");
-            lines.add("log:");
-            lines.add("  level: INFO");
-            lines.add("  console: true");
-            lines.add("  files:");
-            lines.add("    - ./logs/nebula-importer.log");
-            lines.add("sources:");
-
-            for (RecordStore store : vertexStores.values()) {
-                if (store.rows.isEmpty()) {
-                    continue;
-                }
-                VertexSchema schema = (VertexSchema) store.schema;
-                lines.add("  - path: " + yamlQuote("./" + VERTICES_DIR_NAME + "/" + schema.name + ".csv"));
-                lines.add("    batch: " + importerOptions.batch);
-                lines.add("    csv:");
-                lines.add("      delimiter: \",\"");
-                lines.add("      withHeader: false");
-                lines.add("      lazyQuotes: true");
-                lines.add("    tags:");
-                lines.add("      - name: " + yamlQuote(schema.name));
-                lines.add("        id:");
-                lines.add("          type: \"STRING\"");
-                lines.add("          index: 0");
-                lines.add("        props:");
-                for (int i = 0; i < schema.properties.size(); i++) {
-                    Property property = schema.properties.get(i);
-                    lines.add("          - name: " + yamlQuote(property.name));
-                    lines.add("            type: " + yamlQuote(property.type.toUpperCase()));
-                    lines.add("            index: " + (i + 1));
-                    lines.add("            nullable: true");
-                    lines.add("            nullValue: " + yamlQuote(NULL_TOKEN));
-                }
-            }
-
-            for (RecordStore store : edgeStores.values()) {
-                if (store.rows.isEmpty()) {
-                    continue;
-                }
-                EdgeSchema schema = (EdgeSchema) store.schema;
-                lines.add("  - path: " + yamlQuote("./" + EDGES_DIR_NAME + "/" + schema.name + ".csv"));
-                lines.add("    batch: " + importerOptions.batch);
-                lines.add("    csv:");
-                lines.add("      delimiter: \",\"");
-                lines.add("      withHeader: false");
-                lines.add("      lazyQuotes: true");
-                lines.add("    edges:");
-                lines.add("      - name: " + yamlQuote(schema.name));
-                lines.add("        src:");
-                lines.add("          id:");
-                lines.add("            type: \"STRING\"");
-                lines.add("            index: 0");
-                lines.add("        dst:");
-                lines.add("          id:");
-                lines.add("            type: \"STRING\"");
-                lines.add("            index: 1");
-                lines.add("        rank:");
-                lines.add("          index: 2");
-                if (!schema.properties.isEmpty()) {
-                    lines.add("        props:");
-                    for (int i = 0; i < schema.properties.size(); i++) {
-                        Property property = schema.properties.get(i);
-                        lines.add("          - name: " + yamlQuote(property.name));
-                        lines.add("            type: " + yamlQuote(property.type.toUpperCase()));
-                        lines.add("            index: " + (i + 3));
-                        lines.add("            nullable: true");
-                        lines.add("            nullValue: " + yamlQuote(NULL_TOKEN));
-                    }
-                }
-            }
-
-            Files.write(
-                    bundleDir.resolve(IMPORTER_CONFIG_FILE_NAME),
-                    lines,
-                    StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE,
-                    StandardOpenOption.TRUNCATE_EXISTING,
-                    StandardOpenOption.WRITE
-            );
-        }
-
-        private void writeSchemaFile() throws IOException {
-            List<String> lines = new ArrayList<String>();
-            lines.add(createSpaceStatement());
-            lines.add("USE `" + graphConfig.getSpace() + "`;");
-            lines.addAll(schemaStatements());
-            Files.write(
-                    bundleDir.resolve(SCHEMA_FILE_NAME),
-                    lines,
-                    StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE,
-                    StandardOpenOption.TRUNCATE_EXISTING,
-                    StandardOpenOption.WRITE
-            );
-        }
-
-        private void writeScriptsFile() throws IOException {
-            Files.write(
-                    bundleDir.resolve(SCRIPTS_FILE_NAME),
-                    scriptLines,
-                    StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE,
-                    StandardOpenOption.TRUNCATE_EXISTING,
-                    StandardOpenOption.WRITE
-            );
-        }
-
         private void writeManifest() throws IOException {
             Properties properties = new Properties();
-            properties.setProperty("space", graphConfig.getSpace());
             properties.setProperty("total_scripts", String.valueOf(totalScripts));
             properties.setProperty("total_events", String.valueOf(totalEvents));
             properties.setProperty("total_results", String.valueOf(totalResults));
@@ -1209,43 +1056,8 @@ public final class NebulaImporterBundleWriter {
                     StandardOpenOption.TRUNCATE_EXISTING,
                     StandardOpenOption.WRITE
             )) {
-                properties.store(outputStream, "nebula importer bundle manifest");
+                properties.store(outputStream, "lineage data bundle manifest");
             }
-        }
-
-        private void writeRunScripts() throws IOException {
-            List<String> psLines = Arrays.asList(
-                    "param(",
-                    "  [string]$Importer = $env:ZZ_LINEAGE_NEBULA_IMPORTER_BIN",
-                    ")",
-                    "if ([string]::IsNullOrWhiteSpace($Importer)) {",
-                    "  $Importer = \"nebula-importer\"",
-                    "}",
-                    "& $Importer --config (Join-Path $PSScriptRoot '" + IMPORTER_CONFIG_FILE_NAME + "')"
-            );
-            Files.write(
-                    bundleDir.resolve(RUN_PS1_FILE_NAME),
-                    psLines,
-                    StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE,
-                    StandardOpenOption.TRUNCATE_EXISTING,
-                    StandardOpenOption.WRITE
-            );
-
-            List<String> shLines = Arrays.asList(
-                    "#!/usr/bin/env sh",
-                    "set -eu",
-                    "IMPORTER_BIN=\"${ZZ_LINEAGE_NEBULA_IMPORTER_BIN:-nebula-importer}\"",
-                    "\"${IMPORTER_BIN}\" --config \"$(dirname \"$0\")/" + IMPORTER_CONFIG_FILE_NAME + "\""
-            );
-            Files.write(
-                    bundleDir.resolve(RUN_SH_FILE_NAME),
-                    shLines,
-                    StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE,
-                    StandardOpenOption.TRUNCATE_EXISTING,
-                    StandardOpenOption.WRITE
-            );
         }
 
         private void ensureOpen() {
