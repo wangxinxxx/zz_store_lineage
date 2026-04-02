@@ -1,17 +1,17 @@
 package com.zhuanzhuan.lineage.app
 
-import com.vesoft.nebula.connector.{NebulaConnectionConfig, WriteNebulaEdgeConfig, WriteNebulaVertexConfig}
+
 import com.vesoft.nebula.connector.connector.NebulaDataFrameWriter
-import com.zhuanzhuan.lineage.storage.nebula.{NebulaGraphConfig, NebulaImporterBundleWriter, NebulaLineageStorage, SparkNebulaConnectorImporter}
+import com.vesoft.nebula.connector.{NebulaConnectionConfig, WriteNebulaEdgeConfig, WriteNebulaVertexConfig}
+import com.zhuanzhuan.lineage.storage.nebula.{NebulaGraphConfig, NebulaImporterBundleWriter, SparkNebulaConnectorImporter}
 import org.apache.spark.sql.{Dataset, Row, SparkSession}
 import org.apache.spark.sql.types.{DataType, DataTypes, StructField, StructType}
 
 import java.nio.file.{Files, Path, Paths}
-import java.util.Collections
 import scala.collection.JavaConverters._
 
 object ImportNebulaDemo {
-  private val bundleDir = Paths.get("C:\\Users\\w\\IdeaProjects\\zz_store_lineage\\.nebula-importer-bundles\\1775066137023-dw_trade_sale_store_pro_retail_o_83bf1e76")
+  private val bundleDir = Paths.get(".nebula-importer-bundles/1775130710409-dw_trade_sale_store_pro_retail_o_94b34f7a")
   private val importVertices = true
   private val importEdges = true
 
@@ -59,7 +59,7 @@ object ImportNebulaDemo {
     )
 
     try {
-      ensureSchemaReady(graphConfig)
+      SparkNebulaConnectorImporter.ensureSchemaReady(graphConfig, bundleDir)
 
       val connectionConfig = NebulaConnectionConfig
         .builder()
@@ -201,15 +201,6 @@ object ImportNebulaDemo {
     )
   }
 
-  private def ensureSchemaReady(graphConfig: NebulaGraphConfig): Unit = {
-    val storage = new NebulaLineageStorage(graphConfig)
-    try {
-      storage.executeStatements(Collections.emptyList[String]())
-    } finally {
-      storage.close()
-    }
-  }
-
   private def loadCsv(spark: SparkSession, csvPath: Path, schema: StructType, repartition: Int): Dataset[Row] = {
     val dataFrame = spark.read
       .option("header", "false")
@@ -299,6 +290,7 @@ object ImportNebulaDemo {
     }
     nebulaType.trim.toLowerCase match {
       case "int"                => DataTypes.IntegerType
+      case "bool" | "boolean"   => DataTypes.BooleanType
       case "timestamp" | "long" => DataTypes.LongType
       case _                    => DataTypes.StringType
     }

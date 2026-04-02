@@ -64,95 +64,30 @@ public final class NebulaImporterBundleWriter {
     private static final Map<String, EdgeSchema> EDGE_SCHEMAS = new LinkedHashMap<String, EdgeSchema>();
 
     private static final String[][] VERTEX_DEFINITIONS = new String[][]{
-            {"task_node", "task_name:string", "owner:string", "script_path:string", "biz_date:string"},
-            {"run_node", "run_id:string", "biz_date:string"},
-            {"capture_event", "func_name:string", "status:string", "capture_time:timestamp", "statement_type:string", "error_message:string"},
             {"table_node", "normalized_name:string", "catalog_name:string", "database_name:string", "table_name:string", "source_type:string"},
             {"column_node", "column_name:string", "owner_id:string", "owner_type:string", "data_type:string", "qualifier:string"},
-            {"expression_node", "expression_type:string", "expression_sql:string", "normalized_expression:string"},
-            {"scope_node", "scope_name:string", "scope_type:string", "parent_scope_id:string", "plan_node_name:string"},
+            {"expression_node", "expression_type:string", "expression_sql:string", "normalized_expression:string",
+                    "expression_category:string", "display_sql:string", "is_black_box:bool", "query_block_id:string", "plan_node_id:string"},
             {"literal_node", "literal_type:string", "literal_value:string", "normalized_value:string"},
-            {"operator_instance_node", "scope_id:string", "operator_type:string", "operator_sub_type:string", "operator_path:string", "parent_operator_id:string", "plan_node_name:string"},
-            {"column_instance_node", "column_id:string", "column_name:string", "scope_id:string", "relation_instance_id:string", "instance_type:string", "data_type:string", "ordinal:int"},
-            {"relation_instance_node", "instance_name:string", "scope_id:string", "source_table_id:string", "source_type:string", "alias_name:string", "plan_node_name:string"},
-            {"predicate_node", "predicate_type:string", "predicate_sql:string", "normalized_predicate:string", "scope_id:string", "plan_node_name:string"}
+            {"column_instance_node", "column_id:string", "column_name:string", "scope_id:string", "relation_instance_id:string", "instance_type:string", "data_type:string", "ordinal:int",
+                    "instance_role:string", "is_output:bool", "query_block_id:string", "plan_node_id:string"},
+            {"relation_instance_node", "instance_name:string", "scope_id:string", "source_table_id:string", "source_type:string", "alias_name:string", "plan_node_name:string",
+                    "query_block_id:string", "plan_node_id:string", "join_type:string", "null_supply_side:string", "is_subquery_source:bool"},
+            {"predicate_node", "predicate_type:string", "predicate_sql:string", "normalized_predicate:string", "scope_id:string", "plan_node_name:string",
+                    "predicate_role:string", "display_sql:string", "query_block_id:string", "plan_node_id:string"}
     };
 
     private static final String[][] EDGE_DEFINITIONS = new String[][]{
-            {"task_has_run", "run_id:string", "capture_time:timestamp"},
-            {"task_has_execution", "event_id:string", "capture_time:timestamp"},
-            {"run_has_execution", "event_id:string", "capture_time:timestamp"},
-            {"task_reads_table", "event_id:string", "run_id:string", "capture_time:timestamp"},
-            {"task_writes_table", "event_id:string", "run_id:string", "capture_time:timestamp"},
-            {"execution_reads_table", "event_id:string", "capture_time:timestamp"},
-            {"execution_writes_table", "event_id:string", "capture_time:timestamp"},
-            {"execution_emits_column", "event_id:string", "capture_time:timestamp"},
-            {"execution_observes_expression", "event_id:string", "capture_time:timestamp"},
-            {"execution_observes_scope", "event_id:string", "capture_time:timestamp"},
-            {"execution_observes_literal", "event_id:string", "capture_time:timestamp"},
-            {"execution_observes_operator_instance", "event_id:string", "capture_time:timestamp"},
-            {"execution_observes_column_instance", "event_id:string", "capture_time:timestamp"},
-            {"execution_observes_relation_instance", "event_id:string", "capture_time:timestamp"},
-            {"execution_observes_predicate", "event_id:string", "capture_time:timestamp"},
             {"table_has_column"},
-            {"scope_contains_scope", "event_id:string", "capture_time:timestamp", "role:string"},
-            {"scope_outputs_column", "event_id:string", "capture_time:timestamp", "role:string"},
-            {"scope_uses_expression", "event_id:string", "capture_time:timestamp", "role:string"},
-            {"scope_contains_operator_instance", "event_id:string", "capture_time:timestamp", "role:string"},
-            {"operator_precedes_operator_instance", "event_id:string", "capture_time:timestamp", "role:string"},
-            {"operator_outputs_column_instance", "event_id:string", "capture_time:timestamp", "role:string"},
-            {"operator_uses_expression", "event_id:string", "capture_time:timestamp", "role:string"},
-            {"operator_uses_predicate", "event_id:string", "capture_time:timestamp", "role:string"},
-            {"operator_reads_relation_instance", "event_id:string", "capture_time:timestamp", "role:string"},
-            {"scope_contains_column_instance", "event_id:string", "capture_time:timestamp", "role:string"},
-            {"scope_reads_relation_instance", "event_id:string", "capture_time:timestamp", "role:string"},
-            {"relation_instance_exposes_column_instance", "event_id:string", "capture_time:timestamp", "role:string"},
-            {"relation_instance_of_table", "event_id:string", "capture_time:timestamp", "role:string"},
-            {"relation_instance_joins_relation_instance", "event_id:string", "task_id:string", "run_id:string", "capture_time:timestamp", "role:string"},
-            {"latest_relation_instance_joins_relation_instance", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
             {"column_has_instance", "event_id:string", "capture_time:timestamp", "role:string"},
-            {"scope_uses_predicate", "event_id:string", "capture_time:timestamp", "role:string"},
-            {"relation_instance_filtered_by_predicate", "event_id:string", "capture_time:timestamp", "role:string"},
-            {"table_flows_to_table", "event_id:string", "task_id:string", "run_id:string", "write_mode:string", "capture_time:timestamp", "confidence:string"},
-            {"latest_table_flows_to_table", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_write_mode:string", "last_seen_time:timestamp", "confidence:string"},
-            {"column_depends_on_column", "event_id:string", "task_id:string", "run_id:string", "capture_time:timestamp", "role:string"},
-            {"latest_column_depends_on_column", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
-            {"latest_column_flows_to_column", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
-            {"column_uses_expression", "event_id:string", "task_id:string", "run_id:string", "capture_time:timestamp", "role:string"},
-            {"latest_column_uses_expression", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
-            {"latest_expression_flows_to_column", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
-            {"expression_depends_on_column", "event_id:string", "task_id:string", "run_id:string", "capture_time:timestamp", "role:string"},
-            {"latest_expression_depends_on_column", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
-            {"latest_column_flows_to_expression", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
-            {"expression_depends_on_expression", "event_id:string", "task_id:string", "run_id:string", "capture_time:timestamp", "role:string"},
-            {"latest_expression_depends_on_expression", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
-            {"latest_expression_flows_to_expression", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
-            {"expression_depends_on_literal", "event_id:string", "task_id:string", "run_id:string", "capture_time:timestamp", "role:string"},
-            {"latest_expression_depends_on_literal", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
+            {"latest_relation_instance_joins_relation_instance", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
             {"latest_literal_flows_to_expression", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
-            {"expression_depends_on_column_instance", "event_id:string", "task_id:string", "run_id:string", "capture_time:timestamp", "role:string"},
-            {"latest_expression_depends_on_column_instance", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
             {"latest_column_instance_flows_to_expression", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
-            {"column_instance_uses_expression", "event_id:string", "task_id:string", "run_id:string", "capture_time:timestamp", "role:string"},
-            {"latest_column_instance_uses_expression", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
             {"latest_expression_flows_to_column_instance", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
-            {"column_instance_depends_on_column_instance", "event_id:string", "task_id:string", "run_id:string", "capture_time:timestamp", "role:string"},
-            {"latest_column_instance_depends_on_column_instance", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
             {"latest_column_instance_flows_to_column_instance", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
-            {"predicate_depends_on_column", "event_id:string", "task_id:string", "run_id:string", "capture_time:timestamp", "role:string"},
-            {"latest_predicate_depends_on_column", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
-            {"latest_column_flows_to_predicate", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
-            {"predicate_depends_on_column_instance", "event_id:string", "task_id:string", "run_id:string", "capture_time:timestamp", "role:string"},
-            {"latest_predicate_depends_on_column_instance", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
             {"latest_column_instance_flows_to_predicate", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
-            {"column_instance_depends_on_relation_instance", "event_id:string", "task_id:string", "run_id:string", "capture_time:timestamp", "role:string"},
-            {"latest_column_instance_depends_on_relation_instance", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
             {"latest_relation_instance_flows_to_column_instance", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
-            {"column_instance_filtered_by_predicate", "event_id:string", "task_id:string", "run_id:string", "capture_time:timestamp", "role:string"},
-            {"latest_column_instance_filtered_by_predicate", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
             {"latest_predicate_flows_to_column_instance", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
-            {"predicate_depends_on_literal", "event_id:string", "task_id:string", "run_id:string", "capture_time:timestamp", "role:string"},
-            {"latest_predicate_depends_on_literal", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
             {"latest_literal_flows_to_predicate", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"}
     };
 
@@ -439,14 +374,15 @@ public final class NebulaImporterBundleWriter {
                 return finalSummary;
             }
             writeCsvFiles();
+            Path schemaPath = writeSchemaFile();
             writeManifest();
             closed = true;
             finalSummary = new BundleSummary(
                     bundleDir,
-                    null,
-                    null,
-                    null,
-                    null,
+                    bundleDir.resolve(IMPORTER_CONFIG_FILE_NAME),
+                    schemaPath,
+                    bundleDir.resolve(RUN_PS1_FILE_NAME),
+                    bundleDir.resolve(RUN_SH_FILE_NAME),
                     totalScripts,
                     totalEvents,
                     totalResults,
@@ -465,59 +401,10 @@ public final class NebulaImporterBundleWriter {
         }
 
         private void appendEvent(ExecutionCaptureEvent event) {
-            String captureVid = captureVid(event.getEventId());
-            putVertex(vertex("capture_event"), captureVid,
-                    event.getFuncName(),
-                    event.getStatus().name(),
-                    timestamp(event.getCaptureTimeEpochMs()),
-                    "UNKNOWN",
-                    event.getErrorMessage()
-            );
-
-            if (event.getTaskContext().getTaskId() != null) {
-                putVertex(vertex("task_node"), taskVid(event.getTaskContext().getTaskId()),
-                        event.getTaskContext().getTaskName(),
-                        event.getTaskContext().getOwner(),
-                        event.getTaskContext().getScriptPath(),
-                        event.getTaskContext().getBizDate()
-                );
-                putEdge(edge("task_has_execution"),
-                        taskVid(event.getTaskContext().getTaskId()),
-                        captureVid,
-                        edgeRank(event.getEventId(), "task_has_execution"),
-                        event.getEventId(),
-                        timestamp(event.getCaptureTimeEpochMs())
-                );
-            }
-
-            String runId = event.getTaskContext().getRunId();
-            if (runId != null) {
-                putVertex(vertex("run_node"), runVid(runId),
-                        runId,
-                        event.getTaskContext().getBizDate()
-                );
-                if (event.getTaskContext().getTaskId() != null) {
-                    putEdge(edge("task_has_run"),
-                            taskVid(event.getTaskContext().getTaskId()),
-                            runVid(runId),
-                            edgeRank(event.getTaskContext().getTaskId(), runId, "task_has_run"),
-                            runId,
-                            timestamp(event.getCaptureTimeEpochMs())
-                    );
-                }
-                putEdge(edge("run_has_execution"),
-                        runVid(runId),
-                        captureVid,
-                        edgeRank(event.getEventId(), "run_has_execution"),
-                        event.getEventId(),
-                        timestamp(event.getCaptureTimeEpochMs())
-                );
-            }
+            // Phase 1 convergence: execution/task/run metadata is no longer written into the main caliber graph.
         }
 
         private void appendResult(NormalizedLineageResult result) {
-            upsertCaptureEventFromResult(result);
-
             Set<String> knownTableOwners = new LinkedHashSet<String>();
             for (TableRef tableRef : result.getInputTables()) {
                 String inputVid = tableVid(tableRef);
@@ -528,13 +415,6 @@ public final class NebulaImporterBundleWriter {
                         tableRef.getDatabase(),
                         tableRef.getName(),
                         tableRef.getSourceType()
-                );
-                putEdge(edge("execution_reads_table"),
-                        captureVid(result.getEventId()),
-                        inputVid,
-                        edgeRank(result.getEventId(), captureVid(result.getEventId()), inputVid, "execution_reads_table"),
-                        result.getEventId(),
-                        timestamp(result.getCaptureTimeEpochMs())
                 );
             }
 
@@ -548,13 +428,6 @@ public final class NebulaImporterBundleWriter {
                         tableRef.getName(),
                         tableRef.getSourceType()
                 );
-                putEdge(edge("execution_writes_table"),
-                        captureVid(result.getEventId()),
-                        outputVid,
-                        edgeRank(result.getEventId(), captureVid(result.getEventId()), outputVid, "execution_writes_table"),
-                        result.getEventId(),
-                        timestamp(result.getCaptureTimeEpochMs())
-                );
             }
 
             for (ColumnNode columnNode : result.getColumnNodes()) {
@@ -564,13 +437,6 @@ public final class NebulaImporterBundleWriter {
                         columnNode.getOwnerType(),
                         columnNode.getDataType(),
                         join(columnNode.getQualifier(), ".")
-                );
-                putEdge(edge("execution_emits_column"),
-                        captureVid(result.getEventId()),
-                        columnNode.getNodeId(),
-                        edgeRank(result.getEventId(), captureVid(result.getEventId()), columnNode.getNodeId(), "execution_emits_column"),
-                        result.getEventId(),
-                        timestamp(result.getCaptureTimeEpochMs())
                 );
                 String ownerVid = tableOwnerVid(columnNode);
                 if (ownerVid != null && knownTableOwners.contains(ownerVid)) {
@@ -582,30 +448,12 @@ public final class NebulaImporterBundleWriter {
                 putVertex(vertex("expression_node"), expressionNode.getNodeId(),
                         expressionNode.getExpressionType(),
                         expressionNode.getExpressionSql(),
-                        expressionNode.getNormalizedExpression()
-                );
-                putEdge(edge("execution_observes_expression"),
-                        captureVid(result.getEventId()),
-                        expressionNode.getNodeId(),
-                        edgeRank(result.getEventId(), captureVid(result.getEventId()), expressionNode.getNodeId(), "execution_observes_expression"),
-                        result.getEventId(),
-                        timestamp(result.getCaptureTimeEpochMs())
-                );
-            }
-
-            for (ScopeNode scopeNode : result.getScopeNodes()) {
-                putVertex(vertex("scope_node"), scopeNode.getNodeId(),
-                        scopeNode.getScopeName(),
-                        scopeNode.getScopeType(),
-                        scopeNode.getParentScopeId(),
-                        scopeNode.getPlanNodeName()
-                );
-                putEdge(edge("execution_observes_scope"),
-                        captureVid(result.getEventId()),
-                        scopeNode.getNodeId(),
-                        edgeRank(result.getEventId(), captureVid(result.getEventId()), scopeNode.getNodeId(), "execution_observes_scope"),
-                        result.getEventId(),
-                        timestamp(result.getCaptureTimeEpochMs())
+                        expressionNode.getNormalizedExpression(),
+                        expressionNode.getExpressionCategory(),
+                        expressionNode.getDisplaySql(),
+                        bool(expressionNode.isBlackBox()),
+                        expressionNode.getQueryBlockId(),
+                        expressionNode.getPlanNodeId()
                 );
             }
 
@@ -614,31 +462,6 @@ public final class NebulaImporterBundleWriter {
                         literalNode.getLiteralType(),
                         literalNode.getLiteralValue(),
                         literalNode.getNormalizedValue()
-                );
-                putEdge(edge("execution_observes_literal"),
-                        captureVid(result.getEventId()),
-                        literalNode.getNodeId(),
-                        edgeRank(result.getEventId(), captureVid(result.getEventId()), literalNode.getNodeId(), "execution_observes_literal"),
-                        result.getEventId(),
-                        timestamp(result.getCaptureTimeEpochMs())
-                );
-            }
-
-            for (OperatorInstanceNode operatorInstanceNode : result.getOperatorInstanceNodes()) {
-                putVertex(vertex("operator_instance_node"), operatorInstanceNode.getNodeId(),
-                        operatorInstanceNode.getScopeId(),
-                        operatorInstanceNode.getOperatorType(),
-                        operatorInstanceNode.getOperatorSubType(),
-                        operatorInstanceNode.getOperatorPath(),
-                        operatorInstanceNode.getParentOperatorId(),
-                        operatorInstanceNode.getPlanNodeName()
-                );
-                putEdge(edge("execution_observes_operator_instance"),
-                        captureVid(result.getEventId()),
-                        operatorInstanceNode.getNodeId(),
-                        edgeRank(result.getEventId(), captureVid(result.getEventId()), operatorInstanceNode.getNodeId(), "execution_observes_operator_instance"),
-                        result.getEventId(),
-                        timestamp(result.getCaptureTimeEpochMs())
                 );
             }
 
@@ -650,14 +473,11 @@ public final class NebulaImporterBundleWriter {
                         columnInstanceNode.getRelationInstanceId(),
                         columnInstanceNode.getInstanceType(),
                         columnInstanceNode.getDataType(),
-                        integer(columnInstanceNode.getOrdinal())
-                );
-                putEdge(edge("execution_observes_column_instance"),
-                        captureVid(result.getEventId()),
-                        columnInstanceNode.getNodeId(),
-                        edgeRank(result.getEventId(), captureVid(result.getEventId()), columnInstanceNode.getNodeId(), "execution_observes_column_instance"),
-                        result.getEventId(),
-                        timestamp(result.getCaptureTimeEpochMs())
+                        integer(columnInstanceNode.getOrdinal()),
+                        columnInstanceNode.getInstanceRole(),
+                        bool(columnInstanceNode.isOutput()),
+                        columnInstanceNode.getQueryBlockId(),
+                        columnInstanceNode.getPlanNodeId()
                 );
             }
 
@@ -668,14 +488,12 @@ public final class NebulaImporterBundleWriter {
                         relationInstanceNode.getSourceTableId(),
                         relationInstanceNode.getSourceType(),
                         relationInstanceNode.getAliasName(),
-                        relationInstanceNode.getPlanNodeName()
-                );
-                putEdge(edge("execution_observes_relation_instance"),
-                        captureVid(result.getEventId()),
-                        relationInstanceNode.getNodeId(),
-                        edgeRank(result.getEventId(), captureVid(result.getEventId()), relationInstanceNode.getNodeId(), "execution_observes_relation_instance"),
-                        result.getEventId(),
-                        timestamp(result.getCaptureTimeEpochMs())
+                        relationInstanceNode.getPlanNodeName(),
+                        relationInstanceNode.getQueryBlockId(),
+                        relationInstanceNode.getPlanNodeId(),
+                        relationInstanceNode.getJoinType(),
+                        relationInstanceNode.getNullSupplySide(),
+                        bool(relationInstanceNode.isSubquerySource())
                 );
             }
 
@@ -685,68 +503,15 @@ public final class NebulaImporterBundleWriter {
                         predicateNode.getPredicateSql(),
                         predicateNode.getNormalizedPredicate(),
                         predicateNode.getScopeId(),
-                        predicateNode.getPlanNodeName()
+                        predicateNode.getPlanNodeName(),
+                        predicateNode.getPredicateRole(),
+                        predicateNode.getDisplaySql(),
+                        predicateNode.getQueryBlockId(),
+                        predicateNode.getPlanNodeId()
                 );
-                putEdge(edge("execution_observes_predicate"),
-                        captureVid(result.getEventId()),
-                        predicateNode.getNodeId(),
-                        edgeRank(result.getEventId(), captureVid(result.getEventId()), predicateNode.getNodeId(), "execution_observes_predicate"),
-                        result.getEventId(),
-                        timestamp(result.getCaptureTimeEpochMs())
-                );
-            }
-
-            for (TableLineageEdge tableEdge : result.getTableEdges()) {
-                appendTableEdge(tableEdge);
             }
             for (LineageGraphEdge graphEdge : result.getGraphEdges()) {
                 appendGraphEdge(result, graphEdge);
-            }
-        }
-
-        private void appendTableEdge(TableLineageEdge tableEdge) {
-            String sourceVid = tableVid(tableEdge.getSourceTable());
-            String targetVid = tableVid(tableEdge.getTargetTable());
-            putEdge(edge("table_flows_to_table"),
-                    sourceVid,
-                    targetVid,
-                    edgeRank(tableEdge.getEventId(), sourceVid, targetVid, "table_flows_to_table"),
-                    tableEdge.getEventId(),
-                    tableEdge.getTaskId(),
-                    tableEdge.getRunId(),
-                    tableEdge.getWriteMode(),
-                    timestamp(tableEdge.getCaptureTimeEpochMs()),
-                    tableEdge.getConfidence()
-            );
-            putEdge(edge("latest_table_flows_to_table"),
-                    sourceVid,
-                    targetVid,
-                    0L,
-                    tableEdge.getEventId(),
-                    tableEdge.getTaskId(),
-                    tableEdge.getRunId(),
-                    tableEdge.getWriteMode(),
-                    timestamp(tableEdge.getCaptureTimeEpochMs()),
-                    tableEdge.getConfidence()
-            );
-
-            if (tableEdge.getTaskId() != null) {
-                putEdge(edge("task_reads_table"),
-                        taskVid(tableEdge.getTaskId()),
-                        sourceVid,
-                        edgeRank(tableEdge.getEventId(), tableEdge.getTaskId(), tableEdge.getSourceTable().normalizedName(), "task_reads_table"),
-                        tableEdge.getEventId(),
-                        tableEdge.getRunId(),
-                        timestamp(tableEdge.getCaptureTimeEpochMs())
-                );
-                putEdge(edge("task_writes_table"),
-                        taskVid(tableEdge.getTaskId()),
-                        targetVid,
-                        edgeRank(tableEdge.getEventId(), tableEdge.getTaskId(), tableEdge.getTargetTable().normalizedName(), "task_writes_table"),
-                        tableEdge.getEventId(),
-                        tableEdge.getRunId(),
-                        timestamp(tableEdge.getCaptureTimeEpochMs())
-                );
             }
         }
 
@@ -759,225 +524,94 @@ public final class NebulaImporterBundleWriter {
             String rankRole = nullableRankToken(role);
 
             String edgeType = graphEdge.getEdgeType();
-            if ("SCOPE_TO_SCOPE".equals(edgeType)) {
-                putStructuralEdge("scope_contains_scope", graphEdge, eventId, captureTime, role, rankRole);
-                return;
-            }
-            if ("SCOPE_TO_COLUMN".equals(edgeType)) {
-                putStructuralEdge("scope_outputs_column", graphEdge, eventId, captureTime, role, rankRole);
-                return;
-            }
-            if ("SCOPE_TO_EXPRESSION".equals(edgeType)) {
-                putStructuralEdge("scope_uses_expression", graphEdge, eventId, captureTime, role, rankRole);
-                return;
-            }
-            if ("SCOPE_TO_OPERATOR_INSTANCE".equals(edgeType)) {
-                putStructuralEdge("scope_contains_operator_instance", graphEdge, eventId, captureTime, role, rankRole);
-                return;
-            }
-            if ("OPERATOR_TO_OPERATOR_INSTANCE".equals(edgeType)) {
-                putStructuralEdge("operator_precedes_operator_instance", graphEdge, eventId, captureTime, role, rankRole);
-                return;
-            }
-            if ("OPERATOR_TO_COLUMN_INSTANCE".equals(edgeType)) {
-                putStructuralEdge("operator_outputs_column_instance", graphEdge, eventId, captureTime, role, rankRole);
-                return;
-            }
-            if ("OPERATOR_TO_EXPRESSION".equals(edgeType)) {
-                putStructuralEdge("operator_uses_expression", graphEdge, eventId, captureTime, role, rankRole);
-                return;
-            }
-            if ("OPERATOR_TO_PREDICATE".equals(edgeType)) {
-                putStructuralEdge("operator_uses_predicate", graphEdge, eventId, captureTime, role, rankRole);
-                return;
-            }
-            if ("OPERATOR_TO_RELATION_INSTANCE".equals(edgeType)) {
-                putStructuralEdge("operator_reads_relation_instance", graphEdge, eventId, captureTime, role, rankRole);
-                return;
-            }
-            if ("SCOPE_TO_COLUMN_INSTANCE".equals(edgeType)) {
-                putStructuralEdge("scope_contains_column_instance", graphEdge, eventId, captureTime, role, rankRole);
-                return;
-            }
-            if ("SCOPE_TO_RELATION_INSTANCE".equals(edgeType)) {
-                putStructuralEdge("scope_reads_relation_instance", graphEdge, eventId, captureTime, role, rankRole);
-                return;
-            }
-            if ("RELATION_INSTANCE_TO_COLUMN_INSTANCE".equals(edgeType)) {
-                putStructuralEdge("relation_instance_exposes_column_instance", graphEdge, eventId, captureTime, role, rankRole);
-                return;
-            }
-            if ("RELATION_INSTANCE_TO_TABLE".equals(edgeType)) {
-                putStructuralEdge("relation_instance_of_table", graphEdge, eventId, captureTime, role, rankRole);
-                return;
-            }
             if ("COLUMN_TO_COLUMN_INSTANCE".equals(edgeType)) {
-                putStructuralEdge("column_has_instance", graphEdge, eventId, captureTime, role, rankRole);
-                return;
-            }
-            if ("SCOPE_TO_PREDICATE".equals(edgeType)) {
-                putStructuralEdge("scope_uses_predicate", graphEdge, eventId, captureTime, role, rankRole);
-                return;
-            }
-            if ("RELATION_INSTANCE_TO_PREDICATE".equals(edgeType)) {
-                putStructuralEdge("relation_instance_filtered_by_predicate", graphEdge, eventId, captureTime, role, rankRole);
-                return;
-            }
-            if ("RELATION_INSTANCE_TO_RELATION_INSTANCE".equals(edgeType)) {
-                putFactAndLatestEdge(
-                        "relation_instance_joins_relation_instance",
-                        "latest_relation_instance_joins_relation_instance",
+                putEdge(edge("column_has_instance"),
                         graphEdge.getSourceNodeId(),
                         graphEdge.getTargetNodeId(),
-                        edgeRank(eventId, "relation_instance_joins_relation_instance", graphEdge.getSourceNodeId(), graphEdge.getTargetNodeId(), rankRole),
-                        latestSemanticRank("latest_relation_instance_joins_relation_instance", role),
-                        new String[]{eventId, taskId, runId, captureTime, role}
+                        edgeRank("column_has_instance", graphEdge.getSourceNodeId(), graphEdge.getTargetNodeId(), rankRole),
+                        eventId,
+                        captureTime,
+                        role
                 );
                 return;
             }
-            appendFlowDependencyGraphEdge(edgeType, graphEdge, eventId, taskId, runId, captureTime, role, rankRole);
+            if ("RELATION_INSTANCE_TO_RELATION_INSTANCE".equals(edgeType)) {
+                putEdge(edge("latest_relation_instance_joins_relation_instance"),
+                        graphEdge.getSourceNodeId(),
+                        graphEdge.getTargetNodeId(),
+                        latestSemanticRank("latest_relation_instance_joins_relation_instance", role),
+                        eventId,
+                        taskId,
+                        runId,
+                        captureTime,
+                        role
+                );
+                return;
+            }
+            appendCurrentFlowEdge(edgeType, graphEdge, eventId, taskId, runId, captureTime, role);
         }
 
-        private void appendFlowDependencyGraphEdge(
+        private void appendCurrentFlowEdge(
                 String edgeType,
                 LineageGraphEdge graphEdge,
                 String eventId,
                 String taskId,
                 String runId,
                 String captureTime,
-                String role,
-                String rankRole
+                String role
         ) {
-            if ("COLUMN_TO_COLUMN".equals(edgeType)) {
-                putDependencyAndFlowEdge("column_depends_on_column", "latest_column_depends_on_column", "latest_column_flows_to_column", graphEdge, eventId, taskId, runId, captureTime, role, rankRole);
-                return;
-            }
-            if ("COLUMN_TO_PREDICATE".equals(edgeType)) {
-                putDependencyAndFlowEdge("predicate_depends_on_column", "latest_predicate_depends_on_column", "latest_column_flows_to_predicate", graphEdge, eventId, taskId, runId, captureTime, role, rankRole);
-                return;
-            }
             if ("COLUMN_INSTANCE_TO_PREDICATE".equals(edgeType)) {
-                putDependencyAndFlowEdge("predicate_depends_on_column_instance", "latest_predicate_depends_on_column_instance", "latest_column_instance_flows_to_predicate", graphEdge, eventId, taskId, runId, captureTime, role, rankRole);
+                putLatestFlowEdge("latest_column_instance_flows_to_predicate", graphEdge, eventId, taskId, runId, captureTime, role);
                 return;
             }
             if ("RELATION_INSTANCE_TO_DERIVED_COLUMN_INSTANCE".equals(edgeType)) {
-                putDependencyAndFlowEdge("column_instance_depends_on_relation_instance", "latest_column_instance_depends_on_relation_instance", "latest_relation_instance_flows_to_column_instance", graphEdge, eventId, taskId, runId, captureTime, role, rankRole);
+                putLatestFlowEdge("latest_relation_instance_flows_to_column_instance", graphEdge, eventId, taskId, runId, captureTime, role);
                 return;
             }
             if ("PREDICATE_TO_DERIVED_COLUMN_INSTANCE".equals(edgeType)) {
-                putDependencyAndFlowEdge("column_instance_filtered_by_predicate", "latest_column_instance_filtered_by_predicate", "latest_predicate_flows_to_column_instance", graphEdge, eventId, taskId, runId, captureTime, role, rankRole);
+                putLatestFlowEdge("latest_predicate_flows_to_column_instance", graphEdge, eventId, taskId, runId, captureTime, role);
                 return;
             }
             if ("EXPRESSION_TO_COLUMN_INSTANCE".equals(edgeType)) {
-                putDependencyAndFlowEdge("column_instance_uses_expression", "latest_column_instance_uses_expression", "latest_expression_flows_to_column_instance", graphEdge, eventId, taskId, runId, captureTime, role, rankRole);
-                return;
-            }
-            if ("EXPRESSION_TO_COLUMN".equals(edgeType)) {
-                putDependencyAndFlowEdge("column_uses_expression", "latest_column_uses_expression", "latest_expression_flows_to_column", graphEdge, eventId, taskId, runId, captureTime, role, rankRole);
-                return;
-            }
-            if ("COLUMN_TO_EXPRESSION".equals(edgeType)) {
-                putDependencyAndFlowEdge("expression_depends_on_column", "latest_expression_depends_on_column", "latest_column_flows_to_expression", graphEdge, eventId, taskId, runId, captureTime, role, rankRole);
+                putLatestFlowEdge("latest_expression_flows_to_column_instance", graphEdge, eventId, taskId, runId, captureTime, role);
                 return;
             }
             if ("COLUMN_INSTANCE_TO_EXPRESSION".equals(edgeType)) {
-                putDependencyAndFlowEdge("expression_depends_on_column_instance", "latest_expression_depends_on_column_instance", "latest_column_instance_flows_to_expression", graphEdge, eventId, taskId, runId, captureTime, role, rankRole);
+                putLatestFlowEdge("latest_column_instance_flows_to_expression", graphEdge, eventId, taskId, runId, captureTime, role);
                 return;
             }
             if ("COLUMN_INSTANCE_TO_COLUMN_INSTANCE".equals(edgeType)) {
-                putDependencyAndFlowEdge("column_instance_depends_on_column_instance", "latest_column_instance_depends_on_column_instance", "latest_column_instance_flows_to_column_instance", graphEdge, eventId, taskId, runId, captureTime, role, rankRole);
-                return;
-            }
-            if ("EXPRESSION_TO_EXPRESSION".equals(edgeType)) {
-                putDependencyAndFlowEdge("expression_depends_on_expression", "latest_expression_depends_on_expression", "latest_expression_flows_to_expression", graphEdge, eventId, taskId, runId, captureTime, role, rankRole);
+                putLatestFlowEdge("latest_column_instance_flows_to_column_instance", graphEdge, eventId, taskId, runId, captureTime, role);
                 return;
             }
             if ("LITERAL_TO_EXPRESSION".equals(edgeType)) {
-                putDependencyAndFlowEdge("expression_depends_on_literal", "latest_expression_depends_on_literal", "latest_literal_flows_to_expression", graphEdge, eventId, taskId, runId, captureTime, role, rankRole);
+                putLatestFlowEdge("latest_literal_flows_to_expression", graphEdge, eventId, taskId, runId, captureTime, role);
                 return;
             }
             if ("LITERAL_TO_PREDICATE".equals(edgeType)) {
-                putDependencyAndFlowEdge("predicate_depends_on_literal", "latest_predicate_depends_on_literal", "latest_literal_flows_to_predicate", graphEdge, eventId, taskId, runId, captureTime, role, rankRole);
+                putLatestFlowEdge("latest_literal_flows_to_predicate", graphEdge, eventId, taskId, runId, captureTime, role);
             }
         }
 
-        private void putStructuralEdge(String edgeName, LineageGraphEdge graphEdge, String eventId, String captureTime, String role, String rankRole) {
-            putEdge(edge(edgeName),
-                    graphEdge.getSourceNodeId(),
-                    graphEdge.getTargetNodeId(),
-                    edgeRank(edgeName, graphEdge.getSourceNodeId(), graphEdge.getTargetNodeId(), rankRole),
-                    eventId,
-                    captureTime,
-                    role
-            );
-        }
-
-        private void putDependencyAndFlowEdge(
-                String factEdgeName,
-                String latestDependencyEdgeName,
-                String latestFlowEdgeName,
+        private void putLatestFlowEdge(
+                String edgeName,
                 LineageGraphEdge graphEdge,
                 String eventId,
                 String taskId,
                 String runId,
                 String captureTime,
-                String role,
-                String rankRole
+                String role
         ) {
-            putFactAndLatestEdge(
-                    factEdgeName,
-                    latestDependencyEdgeName,
-                    graphEdge.getTargetNodeId(),
-                    graphEdge.getSourceNodeId(),
-                    edgeRank(eventId, factEdgeName, graphEdge.getTargetNodeId(), graphEdge.getSourceNodeId(), rankRole),
-                    latestSemanticRank(latestDependencyEdgeName, role),
-                    new String[]{eventId, taskId, runId, captureTime, role}
-            );
-            putEdge(edge(latestFlowEdgeName),
+            putEdge(edge(edgeName),
                     graphEdge.getSourceNodeId(),
                     graphEdge.getTargetNodeId(),
-                    latestSemanticRank(latestFlowEdgeName, role),
+                    latestSemanticRank(edgeName, role),
                     eventId,
                     taskId,
                     runId,
                     captureTime,
                     role
             );
-        }
-
-        private void putFactAndLatestEdge(
-                String factEdgeName,
-                String latestEdgeName,
-                String srcVid,
-                String dstVid,
-                long factRank,
-                long latestRank,
-                String[] values
-        ) {
-            putEdge(edge(factEdgeName), srcVid, dstVid, factRank, values);
-            putEdge(edge(latestEdgeName), srcVid, dstVid, latestRank, values);
-        }
-
-        private void upsertCaptureEventFromResult(NormalizedLineageResult result) {
-            RecordStore store = vertexStore(vertex("capture_event"));
-            String key = result.getEventId();
-            String[] row = store.rows.get(key);
-            if (row == null) {
-                row = vertex("capture_event").buildVertexRow(captureVid(result.getEventId()),
-                        "unknown",
-                        "SUCCESS",
-                        timestamp(result.getCaptureTimeEpochMs()),
-                        result.getStatementType(),
-                        null
-                );
-                store.rows.put(key, row);
-                totalVertices++;
-                return;
-            }
-            row[2] = row[2] == null ? "SUCCESS" : row[2];
-            row[3] = timestamp(result.getCaptureTimeEpochMs());
-            row[4] = result.getStatementType();
-            row[5] = null;
         }
 
         private RecordStore vertexStore(VertexSchema schema) {
@@ -1058,6 +692,19 @@ public final class NebulaImporterBundleWriter {
             )) {
                 properties.store(outputStream, "lineage data bundle manifest");
             }
+        }
+
+        private Path writeSchemaFile() throws IOException {
+            Path schemaPath = bundleDir.resolve(SCHEMA_FILE_NAME);
+            Files.write(
+                    schemaPath,
+                    schemaStatements(graphConfig.getSpace()),
+                    StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE,
+                    StandardOpenOption.TRUNCATE_EXISTING,
+                    StandardOpenOption.WRITE
+            );
+            return schemaPath;
         }
 
         private void ensureOpen() {
@@ -1190,8 +837,10 @@ public final class NebulaImporterBundleWriter {
         return schema;
     }
 
-    private List<String> schemaStatements() {
+    public static List<String> schemaStatements(String space) {
         List<String> statements = new ArrayList<String>();
+        statements.add(createSpaceStatement(space));
+        statements.add("USE `" + space + "`;");
         for (VertexSchema schema : VERTEX_SCHEMAS.values()) {
             statements.add(schema.renderCreateStatement("CREATE TAG IF NOT EXISTS"));
         }
@@ -1201,8 +850,8 @@ public final class NebulaImporterBundleWriter {
         return statements;
     }
 
-    private String createSpaceStatement() {
-        return "CREATE SPACE IF NOT EXISTS `" + graphConfig.getSpace() + "` (partition_num=10, replica_factor=1, vid_type=FIXED_STRING(256));";
+    private static String createSpaceStatement(String space) {
+        return "CREATE SPACE IF NOT EXISTS `" + space + "` (partition_num=10, replica_factor=1, vid_type=FIXED_STRING(256));";
     }
 
     private static int sizeOf(List<?> values) {
@@ -1258,6 +907,10 @@ public final class NebulaImporterBundleWriter {
 
     private static String integer(Integer value) {
         return value == null ? null : String.valueOf(value);
+    }
+
+    private static String bool(boolean value) {
+        return String.valueOf(value);
     }
 
     private static String join(List<String> values, String delimiter) {

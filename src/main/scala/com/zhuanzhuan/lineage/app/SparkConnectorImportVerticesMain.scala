@@ -44,6 +44,7 @@ object SparkConnectorImportVerticesMain {
     )
 
     println(s"bundleDir=$bundleDir")
+    SparkNebulaConnectorImporter.ensureSchemaReady(graphConfig, bundleDir)
 
     val spark = SparkConnectorImportSupport.createSparkSession(
       appName = "spark-connector-import-vertices-main",
@@ -122,9 +123,10 @@ object SparkConnectorImportVerticesMain {
       return DataTypes.StringType
     }
     nebulaType.trim.toLowerCase match {
-      case "int"               => DataTypes.IntegerType
+      case "int"                => DataTypes.IntegerType
+      case "bool" | "boolean"   => DataTypes.BooleanType
       case "timestamp" | "long" => DataTypes.LongType
-      case _                   => DataTypes.StringType
+      case _                    => DataTypes.StringType
     }
   }
 }

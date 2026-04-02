@@ -1,5 +1,11 @@
 package com.zhuanzhuan.lineage.storage.nebula;
 
+import com.vesoft.nebula.client.graph.NebulaPoolConfig;
+import com.vesoft.nebula.client.graph.data.HostAddress;
+import com.vesoft.nebula.client.graph.data.ResultSet;
+import com.vesoft.nebula.client.graph.data.ValueWrapper;
+import com.vesoft.nebula.client.graph.net.NebulaPool;
+import com.vesoft.nebula.client.graph.net.Session;
 import com.vesoft.nebula.connector.NebulaDataSource;
 import com.vesoft.nebula.connector.NebulaOptions;
 import org.apache.spark.sql.DataFrameReader;
@@ -15,11 +21,13 @@ import org.apache.spark.sql.types.StructType;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -86,6 +94,20 @@ public final class SparkNebulaConnectorImporter {
                 manifest.totalEdges,
                 System.currentTimeMillis() - startedAt
         );
+    }
+
+    public static void ensureSchemaReady(NebulaGraphConfig graphConfig, Path bundleDir) throws IOException {
+        NebulaPool pool = new NebulaPool();
+        initPool(pool, graphConfig);
+        try {
+            List<String> statements = loadSchemaStatements(bundleDir, graphConfig.getSpace());
+            executeBootstrapStatements(pool, graphConfig, statements);
+            waitForSchemaReady(pool, graphConfig);
+            reconcileSchema(pool, graphConfig);
+            waitForSchemaReady(pool, graphConfig);
+        } finally {
+            pool.close();
+        }
     }
 
     private Map<String, String> applyRuntimeOverrides() {
@@ -172,12 +194,6 @@ public final class SparkNebulaConnectorImporter {
         return count;
     }
 
-    private void ensureSchemaReady() {
-        try (NebulaLineageStorage storage = new NebulaLineageStorage(graphConfig)) {
-            storage.executeStatements(Collections.<String>emptyList());
-        }
-    }
-
     private SparkSession createSparkSession(Path warehouseDir) {
         SparkSession.Builder builder = SparkSession.builder()
                 .appName("spark-nebula-connector-importer")
@@ -262,6 +278,7 @@ public final class SparkNebulaConnectorImporter {
                 .option(NebulaOptions.CONNECTION_RETRY(), String.valueOf(options.connectionRetry))
                 .option(NebulaOptions.EXECUTION_RETRY(), String.valueOf(options.executionRetry))
                 .save();
+
     }
 
     private StructType vertexStruct(NebulaImporterBundleWriter.CsvSchema schema) {
@@ -292,6 +309,9 @@ public final class SparkNebulaConnectorImporter {
         if ("int".equals(normalized)) {
             return DataTypes.IntegerType;
         }
+        if ("bool".equals(normalized) || "boolean".equals(normalized)) {
+            return DataTypes.BooleanType;
+        }
         if ("timestamp".equals(normalized) || "long".equals(normalized)) {
             return DataTypes.LongType;
         }
@@ -316,6 +336,240 @@ public final class SparkNebulaConnectorImporter {
     private static void applySparkOverrides(SparkSession.Builder builder) {
         for (Map.Entry<String, String> entry : prefixedProperties(SPARK_CONF_PREFIX).entrySet()) {
             builder.config(entry.getKey(), entry.getValue());
+        }
+    }
+
+    private static List<String> loadSchemaStatements(Path bundleDir, String space) throws IOException {
+        if (bundleDir != null) {
+            Path schemaPath = bundleDir.toAbsolutePath().normalize().resolve(NebulaImporterBundleWriter.SCHEMA_FILE_NAME);
+            if (Files.isRegularFile(schemaPath)) {
+                List<String> statements = new ArrayList<String>();
+                for (String line : Files.readAllLines(schemaPath, StandardCharsets.UTF_8)) {
+                    String statement = line == null ? "" : line.trim();
+                    if (statement.isEmpty() || statement.startsWith("#") || statement.startsWith("--")) {
+                        continue;
+                    }
+                    statements.add(statement);
+                }
+                if (!statements.isEmpty()) {
+                    return statements;
+                }
+            }
+        }
+        return NebulaImporterBundleWriter.schemaStatements(space);
+    }
+
+    private static void executeBootstrapStatements(
+            NebulaPool pool,
+            NebulaGraphConfig graphConfig,
+            List<String> statements
+    ) {
+        if (statements == null || statements.isEmpty()) {
+            return;
+        }
+
+        try (Session session = pool.getSession(graphConfig.getUsername(), graphConfig.getPassword(), true)) {
+            for (String statement : statements) {
+                if (isCreateSpaceStatement(statement)) {
+                    execute(session, statement);
+                }
+            }
+        } catch (Exception error) {
+            throw new IllegalStateException("Failed to bootstrap NebulaGraph space `" + graphConfig.getSpace() + "`.", error);
+        }
+
+        waitForSpaceReady(pool, graphConfig);
+
+        try (Session session = pool.getSession(graphConfig.getUsername(), graphConfig.getPassword(), true)) {
+            execute(session, "USE `" + graphConfig.getSpace() + "`;");
+            for (String statement : statements) {
+                if (isCreateSpaceStatement(statement) || isUseStatement(statement)) {
+                    continue;
+                }
+                execute(session, statement);
+            }
+        } catch (Exception error) {
+            throw new IllegalStateException("Failed to create NebulaGraph schema for `" + graphConfig.getSpace() + "`.", error);
+        }
+    }
+
+    private static void reconcileSchema(NebulaPool pool, NebulaGraphConfig graphConfig) {
+        try (Session session = pool.getSession(graphConfig.getUsername(), graphConfig.getPassword(), true)) {
+            execute(session, "USE `" + graphConfig.getSpace() + "`;");
+            for (NebulaImporterBundleWriter.CsvSchema schema : NebulaImporterBundleWriter.vertexSchemas()) {
+                reconcileTag(session, schema);
+            }
+            for (NebulaImporterBundleWriter.CsvSchema schema : NebulaImporterBundleWriter.edgeSchemas()) {
+                reconcileEdge(session, schema);
+            }
+        } catch (Exception error) {
+            throw new IllegalStateException("Failed to reconcile NebulaGraph schema for `" + graphConfig.getSpace() + "`.", error);
+        }
+    }
+
+    private static void reconcileTag(Session session, NebulaImporterBundleWriter.CsvSchema schema) throws Exception {
+        reconcileProperties(session, "TAG", schema);
+    }
+
+    private static void reconcileEdge(Session session, NebulaImporterBundleWriter.CsvSchema schema) throws Exception {
+        reconcileProperties(session, "EDGE", schema);
+    }
+
+    private static void reconcileProperties(
+            Session session,
+            String entityKind,
+            NebulaImporterBundleWriter.CsvSchema schema
+    ) throws Exception {
+        Map<String, String> existingProperties = describeProperties(session, entityKind, schema.getName());
+        List<String> missingDefinitions = new ArrayList<String>();
+        for (NebulaImporterBundleWriter.PropertySpec property : schema.getProperties()) {
+            String expectedType = normalizeType(property.getType());
+            String actualType = existingProperties.get(property.getName());
+            if (actualType == null) {
+                missingDefinitions.add(renderProperty(property));
+                continue;
+            }
+            if (!expectedType.equals(normalizeType(actualType))) {
+                throw new IllegalStateException(
+                        entityKind + " `" + schema.getName() + "` property `" + property.getName()
+                                + "` type mismatch. expected=" + expectedType + ", actual=" + actualType
+                );
+            }
+        }
+        if (missingDefinitions.isEmpty()) {
+            return;
+        }
+        StringBuilder statement = new StringBuilder();
+        statement.append("ALTER ").append(entityKind).append(" `").append(schema.getName()).append("` ADD (");
+        for (int i = 0; i < missingDefinitions.size(); i++) {
+            if (i > 0) {
+                statement.append(", ");
+            }
+            statement.append(missingDefinitions.get(i));
+        }
+        statement.append(");");
+        execute(session, statement.toString());
+    }
+
+    private static Map<String, String> describeProperties(Session session, String entityKind, String entityName) throws Exception {
+        ResultSet resultSet = execute(session, "DESCRIBE " + entityKind + " `" + entityName + "`;");
+        Map<String, String> properties = new LinkedHashMap<String, String>();
+        for (int i = 0; i < resultSet.rowsSize(); i++) {
+            ResultSet.Record record = resultSet.rowValues(i);
+            if (record == null || record.size() < 2) {
+                continue;
+            }
+            String propertyName = stringify(record.get(0));
+            String propertyType = stringify(record.get(1));
+            if (propertyName == null || propertyName.trim().isEmpty()) {
+                continue;
+            }
+            properties.put(propertyName.trim(), propertyType == null ? "" : propertyType.trim());
+        }
+        return properties;
+    }
+
+    private static void waitForSpaceReady(NebulaPool pool, NebulaGraphConfig graphConfig) {
+        RuntimeException lastError = null;
+        for (int attempt = 0; attempt < 20; attempt++) {
+            try (Session session = pool.getSession(graphConfig.getUsername(), graphConfig.getPassword(), true)) {
+                ResultSet resultSet = session.execute("USE `" + graphConfig.getSpace() + "`;");
+                if (resultSet.isSucceeded()) {
+                    return;
+                }
+                lastError = new IllegalStateException(resultSet.getErrorMessage());
+            } catch (Exception error) {
+                lastError = new RuntimeException(error);
+            }
+            sleepQuietly(1000L);
+        }
+        throw new IllegalStateException("NebulaGraph space `" + graphConfig.getSpace() + "` is not ready.", lastError);
+    }
+
+    private static void waitForSchemaReady(NebulaPool pool, NebulaGraphConfig graphConfig) {
+        RuntimeException lastError = null;
+        for (int attempt = 0; attempt < 20; attempt++) {
+            try (Session session = pool.getSession(graphConfig.getUsername(), graphConfig.getPassword(), true)) {
+                execute(session, "USE `" + graphConfig.getSpace() + "`;");
+                for (NebulaImporterBundleWriter.CsvSchema schema : NebulaImporterBundleWriter.vertexSchemas()) {
+                    execute(session, "DESCRIBE TAG `" + schema.getName() + "`;");
+                }
+                for (NebulaImporterBundleWriter.CsvSchema schema : NebulaImporterBundleWriter.edgeSchemas()) {
+                    execute(session, "DESCRIBE EDGE `" + schema.getName() + "`;");
+                }
+                return;
+            } catch (Exception error) {
+                lastError = new RuntimeException(error);
+            }
+            sleepQuietly(1000L);
+        }
+        throw new IllegalStateException("NebulaGraph schema for `" + graphConfig.getSpace() + "` is not ready.", lastError);
+    }
+
+    private static void initPool(NebulaPool pool, NebulaGraphConfig graphConfig) {
+        NebulaPoolConfig poolConfig = new NebulaPoolConfig()
+                .setMinConnSize(graphConfig.getMinConnSize())
+                .setMaxConnSize(graphConfig.getMaxConnSize())
+                .setTimeout(graphConfig.getTimeoutMs())
+                .setMinClusterHealthRate(0.0d);
+        try {
+            pool.init(Collections.singletonList(new HostAddress(graphConfig.getHost(), graphConfig.getPort())), poolConfig);
+        } catch (Exception error) {
+            throw new IllegalStateException(
+                    "Failed to initialize NebulaGraph pool for " + graphConfig.getHost() + ":" + graphConfig.getPort(),
+                    error
+            );
+        }
+    }
+
+    private static ResultSet execute(Session session, String statement) throws Exception {
+        ResultSet resultSet = session.execute(statement);
+        if (!resultSet.isSucceeded()) {
+            throw new IllegalStateException("Failed nGQL: " + statement + ", error=" + resultSet.getErrorMessage());
+        }
+        return resultSet;
+    }
+
+    private static String renderProperty(NebulaImporterBundleWriter.PropertySpec property) {
+        return "`" + property.getName() + "` " + property.getType();
+    }
+
+    private static String normalizeType(String type) {
+        return type == null ? "" : type.trim().toLowerCase();
+    }
+
+    private static boolean isCreateSpaceStatement(String statement) {
+        return statement != null && statement.trim().toUpperCase().startsWith("CREATE SPACE");
+    }
+
+    private static boolean isUseStatement(String statement) {
+        return statement != null && statement.trim().toUpperCase().startsWith("USE ");
+    }
+
+    private static String stringify(ValueWrapper valueWrapper) throws Exception {
+        if (valueWrapper == null || valueWrapper.isEmpty() || valueWrapper.isNull()) {
+            return "";
+        }
+        if (valueWrapper.isString()) {
+            return valueWrapper.asString();
+        }
+        if (valueWrapper.isLong()) {
+            return String.valueOf(valueWrapper.asLong());
+        }
+        if (valueWrapper.isDouble()) {
+            return String.valueOf(valueWrapper.asDouble());
+        }
+        if (valueWrapper.isBoolean()) {
+            return String.valueOf(valueWrapper.asBoolean());
+        }
+        return valueWrapper.toString();
+    }
+
+    private static void sleepQuietly(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
         }
     }
 

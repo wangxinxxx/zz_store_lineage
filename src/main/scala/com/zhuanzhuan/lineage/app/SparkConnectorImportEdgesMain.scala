@@ -2,12 +2,11 @@ package com.zhuanzhuan.lineage.app
 
 import com.vesoft.nebula.connector.{NebulaConnectionConfig, WriteNebulaEdgeConfig}
 import com.vesoft.nebula.connector.connector.NebulaDataFrameWriter
-import com.zhuanzhuan.lineage.storage.nebula.{NebulaGraphConfig, NebulaImporterBundleWriter, NebulaLineageStorage, SparkNebulaConnectorImporter}
+import com.zhuanzhuan.lineage.storage.nebula.{NebulaGraphConfig, NebulaImporterBundleWriter, SparkNebulaConnectorImporter}
 import org.apache.spark.sql.{Dataset, Row, SparkSession}
 import org.apache.spark.sql.types.{DataType, DataTypes, StructField, StructType}
 
 import java.nio.file.Path
-import java.util.Collections
 import scala.collection.JavaConverters._
 
 object SparkConnectorImportEdgesMain {
@@ -45,7 +44,7 @@ object SparkConnectorImportEdgesMain {
     )
 
     println(s"bundleDir=$bundleDir")
-    ensureSchemaReady(graphConfig)
+    SparkNebulaConnectorImporter.ensureSchemaReady(graphConfig, bundleDir)
 
     val spark = SparkConnectorImportSupport.createSparkSession(
       appName = "spark-connector-import-edges-main",
@@ -102,15 +101,6 @@ object SparkConnectorImportEdgesMain {
     }
   }
 
-  private def ensureSchemaReady(graphConfig: NebulaGraphConfig): Unit = {
-    val storage = new NebulaLineageStorage(graphConfig)
-    try {
-      storage.executeStatements(Collections.emptyList[String]())
-    } finally {
-      storage.close()
-    }
-  }
-
   private def loadCsv(spark: SparkSession, csvPath: Path, schema: StructType, repartition: Int): Dataset[Row] = {
     val dataFrame = spark.read
       .option("header", "false")
@@ -139,9 +129,10 @@ object SparkConnectorImportEdgesMain {
       return DataTypes.StringType
     }
     nebulaType.trim.toLowerCase match {
-      case "int"               => DataTypes.IntegerType
+      case "int"                => DataTypes.IntegerType
+      case "bool" | "boolean"   => DataTypes.BooleanType
       case "timestamp" | "long" => DataTypes.LongType
-      case _                   => DataTypes.StringType
+      case _                    => DataTypes.StringType
     }
   }
 }

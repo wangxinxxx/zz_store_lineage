@@ -8,6 +8,11 @@ public final class RelationInstanceNode {
     private final String sourceType;
     private final String aliasName;
     private final String planNodeName;
+    private final String queryBlockId;
+    private final String planNodeId;
+    private final String joinType;
+    private final String nullSupplySide;
+    private final boolean subquerySource;
 
     public RelationInstanceNode(
             String nodeId,
@@ -18,6 +23,36 @@ public final class RelationInstanceNode {
             String aliasName,
             String planNodeName
     ) {
+        this(
+                nodeId,
+                instanceName,
+                scopeId,
+                sourceTableId,
+                sourceType,
+                aliasName,
+                planNodeName,
+                scopeId,
+                null,
+                null,
+                null,
+                "named_plan".equalsIgnoreCase(sourceType)
+        );
+    }
+
+    public RelationInstanceNode(
+            String nodeId,
+            String instanceName,
+            String scopeId,
+            String sourceTableId,
+            String sourceType,
+            String aliasName,
+            String planNodeName,
+            String queryBlockId,
+            String planNodeId,
+            String joinType,
+            String nullSupplySide,
+            boolean subquerySource
+    ) {
         this.nodeId = nodeId;
         this.instanceName = instanceName;
         this.scopeId = scopeId;
@@ -25,6 +60,11 @@ public final class RelationInstanceNode {
         this.sourceType = sourceType;
         this.aliasName = aliasName;
         this.planNodeName = planNodeName;
+        this.queryBlockId = queryBlockId;
+        this.planNodeId = planNodeId;
+        this.joinType = joinType;
+        this.nullSupplySide = nullSupplySide;
+        this.subquerySource = subquerySource;
     }
 
     public String getNodeId() {
@@ -53,5 +93,25 @@ public final class RelationInstanceNode {
 
     public String getPlanNodeName() {
         return planNodeName;
+    }
+
+    public String getQueryBlockId() {
+        return queryBlockId;
+    }
+
+    public String getPlanNodeId() {
+        return planNodeId;
+    }
+
+    public String getJoinType() {
+        return joinType;
+    }
+
+    public String getNullSupplySide() {
+        return nullSupplySide;
+    }
+
+    public boolean isSubquerySource() {
+        return subquerySource;
     }
 }

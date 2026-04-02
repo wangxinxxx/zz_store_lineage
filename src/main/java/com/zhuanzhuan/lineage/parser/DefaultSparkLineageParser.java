@@ -84,6 +84,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
             LogicalPlan optimizedPlan
     ) {
         LogicalPlan inputPlan = analyzedPlan != null ? analyzedPlan : logicalPlan;
+        LogicalPlan lineagePlan = inputPlan != null ? inputPlan : (optimizedPlan != null ? optimizedPlan : logicalPlan);
 
         List<TableRef> inputTables = deduplicateTables(collectInputTables(inputPlan));
         List<TableRef> outputTables = deduplicateTables(collectOutputTables(logicalPlan));
@@ -96,7 +97,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
         ResolutionContext resolutionContext = buildResolutionContext(logicalPlan, inputPlan, optimizedPlan);
         String rootScopeId = collectScopeGraph(
                 event,
-                logicalPlan != null ? logicalPlan : inputPlan,
+                lineagePlan,
                 statementType,
                 outputTables,
                 graphBuilder,
@@ -104,7 +105,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
         );
         String rootOutputOperatorId = null;
         if (rootScopeId != null) {
-            LogicalPlan outputPlan = unwrapOutputPlan(logicalPlan != null ? logicalPlan : inputPlan);
+            LogicalPlan outputPlan = unwrapOutputPlan(lineagePlan);
             if (outputPlan != null) {
                 rootOutputOperatorId = registerOperatorInstance(
                         event,
@@ -138,6 +139,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                         "OUTPUT",
                         "final_output",
                         i,
+                        rootOutputOperatorId,
                         graphBuilder
                 );
                 connectOperatorToOutputInstances(event, rootOutputOperatorId, outputColumnInstances, graphBuilder);
@@ -213,35 +215,25 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
             if ("OUTPUT".equals(consumerInstance.getInstanceType())) {
                 continue;
             }
-            if (consumerInstance.getRelationInstanceId() != null) {
-                continue;
-            }
             ColumnNode referencedColumn = builder.findColumn(consumerInstance.getColumnId());
-            if (referencedColumn == null || !"SCOPE".equals(referencedColumn.getOwnerType())) {
-                continue;
-            }
-            String ownerScopeId = referencedColumn.getOwnerId();
-            if (ownerScopeId == null || ownerScopeId.isEmpty()) {
-                continue;
-            }
-            if (!builder.isScopeSameOrDescendant(consumerInstance.getScopeId(), ownerScopeId)) {
+            if (referencedColumn == null) {
                 continue;
             }
             for (ColumnInstanceNode producerInstance : builder.findColumnInstancesByColumnId(referencedColumn.getNodeId())) {
                 if (!"OUTPUT".equals(producerInstance.getInstanceType())) {
                     continue;
                 }
-                if (!ownerScopeId.equals(producerInstance.getScopeId())) {
+                if (producerInstance.getNodeId().equals(consumerInstance.getNodeId())) {
                     continue;
                 }
-                if (producerInstance.getNodeId().equals(consumerInstance.getNodeId())) {
+                if (!builder.isScopeSameOrDescendant(consumerInstance.getScopeId(), producerInstance.getScopeId())) {
                     continue;
                 }
                 builder.addEdge(new LineageGraphEdge(
                         producerInstance.getNodeId(),
                         consumerInstance.getNodeId(),
                         "COLUMN_INSTANCE_TO_COLUMN_INSTANCE",
-                        "scope_output_reference",
+                        "query_block_output_reference",
                         event.getEventId()
                 ));
             }
@@ -377,9 +369,20 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
             return;
         }
         relationInstanceRoles.put(relationInstanceId, "source_relation_instance");
+        boolean foundDirectPredicate = false;
+        for (LineageGraphEdge edge : builder.outgoingEdges(columnInstanceNode.getNodeId())) {
+            if (!"COLUMN_INSTANCE_TO_PREDICATE".equals(edge.getEdgeType())) {
+                continue;
+            }
+            predicateRoles.put(edge.getTargetNodeId(), "value_condition");
+            foundDirectPredicate = true;
+        }
+        if (foundDirectPredicate) {
+            return;
+        }
         for (LineageGraphEdge edge : builder.outgoingEdges(relationInstanceId)) {
             if ("RELATION_INSTANCE_TO_PREDICATE".equals(edge.getEdgeType())) {
-                predicateRoles.put(edge.getTargetNodeId(), normalizePredicateRole(edge.getRole()));
+                predicateRoles.put(edge.getTargetNodeId(), normalizePredicateRole(edge.getRole(), null));
             }
         }
     }
@@ -505,6 +508,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                     "OUTPUT",
                     "scope_output",
                     i,
+                    operatorInstanceId,
                     builder
             );
             connectOperatorToOutputInstances(event, operatorInstanceId, outputColumnInstances, builder);
@@ -614,6 +618,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                             aliasedTable.get(),
                             normalizeIdentifierToken(alias.alias()),
                             scopePlan.nodeName(),
+                            parentOperatorId,
                             builder
                     ));
                 }
@@ -651,6 +656,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                                 path,
                                 namedRelationName(identifierParts),
                                 namedPlan.get().nodeName(),
+                                operatorInstanceId,
                                 builder
                         );
                         connectOperatorToRelations(
@@ -795,6 +801,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                         localTableRef.get(),
                         null,
                         scopePlan.nodeName(),
+                        operatorInstanceId,
                         builder
                 );
                 connectOperatorToRelations(
@@ -846,7 +853,12 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                 expressionNodeId(operatorInstanceId + "|" + role + "|" + path, expression),
                 expression.prettyName(),
                 safeExpressionSql(expression),
-                normalizeExpression(expression)
+                normalizeExpression(expression),
+                classifyExpressionCategory(expression),
+                safeExpressionSql(expression),
+                isBlackBoxExpression(expression),
+                scopeNodeId,
+                operatorInstanceId
         );
         builder.addExpression(expressionNode);
         if (scopeNodeId != null) {
@@ -877,26 +889,15 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                     "source_column",
                     event.getEventId()
             ));
-            if (scopeNodeId != null) {
-                for (ColumnInstanceNode columnInstanceNode : createColumnInstances(
-                        event,
-                        scopeNodeId,
-                        sourceColumn,
-                        "EXPRESSION_INPUT",
-                        "expression_input",
-                        null,
-                        builder
-                )) {
-                    builder.addEdge(new LineageGraphEdge(
-                            columnInstanceNode.getNodeId(),
-                            expressionNode.getNodeId(),
-                            "COLUMN_INSTANCE_TO_EXPRESSION",
-                            "source_column_instance",
-                            event.getEventId()
-                    ));
-                }
-            }
         }
+        connectExpressionInputInstances(
+                event,
+                scopeNodeId,
+                expressionNode.getNodeId(),
+                new ArrayList<>(sourceColumns.values()),
+                sourceColumns.values(),
+                builder
+        );
         collectLiteralNodes(expression, expressionNode.getNodeId(), builder, event, "LITERAL_TO_EXPRESSION", "literal");
     }
 
@@ -915,21 +916,26 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
         if (predicateExpression == null) {
             return;
         }
-        String predicateRole = normalizePredicateRole(predicateType);
+        String predicateRole = normalizePredicateRole(predicateType, planNodeName);
+        String predicateEdgeRole = predicateEdgeRole(predicateRole);
         PredicateNode predicateNode = new PredicateNode(
                 predicateNodeId(scopeNodeId, path, predicateType, predicateExpression),
                 predicateType,
                 safeExpressionSql(predicateExpression),
                 normalizeExpression(predicateExpression),
                 scopeNodeId,
-                planNodeName
+                planNodeName,
+                predicateRole,
+                safeExpressionSql(predicateExpression),
+                scopeNodeId,
+                operatorInstanceId
         );
         builder.addPredicate(predicateNode);
         builder.addEdge(new LineageGraphEdge(
                 scopeNodeId,
                 predicateNode.getNodeId(),
                 "SCOPE_TO_PREDICATE",
-                predicateRole,
+                predicateEdgeRole,
                 event.getEventId()
         ));
         if (operatorInstanceId != null) {
@@ -937,23 +943,14 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                     operatorInstanceId,
                     predicateNode.getNodeId(),
                     "OPERATOR_TO_PREDICATE",
-                    predicateRole,
-                    event.getEventId()
-            ));
-        }
-
-        for (RelationInstanceNode relationInstanceNode : relationInstances) {
-            builder.addEdge(new LineageGraphEdge(
-                    relationInstanceNode.getNodeId(),
-                    predicateNode.getNodeId(),
-                    "RELATION_INSTANCE_TO_PREDICATE",
-                    predicateRole,
+                    predicateEdgeRole,
                     event.getEventId()
             ));
         }
 
         LinkedHashMap<String, ColumnNode> predicateColumns = new LinkedHashMap<>();
         collectSourceColumns(predicateExpression, predicateColumns, resolutionContext);
+        LinkedHashMap<String, RelationInstanceNode> relatedRelations = new LinkedHashMap<>();
         for (ColumnNode predicateColumn : predicateColumns.values()) {
             builder.addColumn(predicateColumn);
             builder.addEdge(new LineageGraphEdge(
@@ -970,6 +967,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                     "PREDICATE_INPUT",
                     "predicate_input",
                     null,
+                    operatorInstanceId,
                     builder
             )) {
                 builder.addEdge(new LineageGraphEdge(
@@ -979,7 +977,27 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                         "predicate_column_instance",
                         event.getEventId()
                 ));
+                if (columnInstanceNode.getRelationInstanceId() != null) {
+                    RelationInstanceNode relationInstanceNode = builder.findRelationInstance(columnInstanceNode.getRelationInstanceId());
+                    if (relationInstanceNode != null) {
+                        relatedRelations.put(relationInstanceNode.getNodeId(), relationInstanceNode);
+                    }
+                }
             }
+        }
+        if (relatedRelations.isEmpty()) {
+            for (RelationInstanceNode relationInstanceNode : relationInstances) {
+                relatedRelations.put(relationInstanceNode.getNodeId(), relationInstanceNode);
+            }
+        }
+        for (RelationInstanceNode relationInstanceNode : relatedRelations.values()) {
+            builder.addEdge(new LineageGraphEdge(
+                    relationInstanceNode.getNodeId(),
+                    predicateNode.getNodeId(),
+                    "RELATION_INSTANCE_TO_PREDICATE",
+                    predicateEdgeRole,
+                    event.getEventId()
+            ));
         }
 
         collectLiteralNodes(predicateExpression, predicateNode.getNodeId(), builder, event, "LITERAL_TO_PREDICATE", "literal");
@@ -1000,25 +1018,13 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
             LogicalPlan optimizedPlan,
             ResolutionContext resolutionContext
     ) {
-        List<List<TargetExpression>> candidates = new ArrayList<>();
-        addCandidate(candidates, tryCollectTargetExpressions(logicalPlan, resolutionContext));
-        addCandidate(candidates, tryCollectTargetExpressions(analyzedPlan, resolutionContext));
-        addCandidate(candidates, tryCollectTargetExpressions(optimizedPlan, resolutionContext));
-        if (candidates.isEmpty()) {
-            return Collections.emptyList();
-        }
-
-        List<TargetExpression> best = candidates.get(0);
-        int bestScore = scoreTargetExpressions(best);
-        for (int i = 1; i < candidates.size(); i++) {
-            List<TargetExpression> candidate = candidates.get(i);
-            int score = scoreTargetExpressions(candidate);
-            if (score > bestScore) {
-                best = candidate;
-                bestScore = score;
+        for (LogicalPlan candidatePlan : new LogicalPlan[]{analyzedPlan, logicalPlan, optimizedPlan}) {
+            List<TargetExpression> candidate = tryCollectTargetExpressions(candidatePlan, resolutionContext);
+            if (!candidate.isEmpty()) {
+                return candidate;
             }
         }
-        return best;
+        return Collections.emptyList();
     }
 
     private List<TargetExpression> tryCollectTargetExpressions(LogicalPlan plan, ResolutionContext resolutionContext) {
@@ -1671,14 +1677,15 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
             ResolutionContext resolutionContext,
             Set<String> visitingExpressions
     ) {
+        List<ColumnNode> directSources = targetExpression.getDirectSourceColumns();
         List<ColumnNode> expandedSources = targetExpression.getSourceColumns();
         Expression expression = targetExpression.getExpression();
         boolean forceExpressionNode = shouldMaterializeExpressionNode(targetExpression);
         if (isDirectReferenceExpression(expression)
-                && expandedSources.size() == 1
+                && !directSources.isEmpty()
                 && targetExpression.getDependentTargets().isEmpty()
                 && !forceExpressionNode) {
-            ColumnNode column = expandedSources.get(0);
+            ColumnNode column = directSources.get(0);
             builder.addColumn(column);
             builder.addEdge(new LineageGraphEdge(
                     column.getNodeId(),
@@ -1687,6 +1694,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                     role,
                     event.getEventId()
             ));
+            connectDirectSourceToOutputColumnInstances(event, scopeNodeId, column, sinkColumnInstances, role, builder);
             return;
         }
         String visitingKey = sinkNodeId + "|" + normalizeExpression(expression) + "|" + path;
@@ -1706,6 +1714,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                     sinkColumnInstances,
                     builder,
                     resolutionContext,
+                    directSources,
                     expandedSources,
                     forceExpressionNode
             );
@@ -1754,8 +1763,8 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
         if (dependentTarget == null || dependentTarget.getExpression() == null) {
             return;
         }
-        if (isDirectReferenceExpression(dependentTarget.getExpression()) && dependentTarget.getSourceColumns().size() == 1) {
-            ColumnNode column = dependentTarget.getSourceColumns().get(0);
+        if (isDirectReferenceExpression(dependentTarget.getExpression()) && !dependentTarget.getDirectSourceColumns().isEmpty()) {
+            ColumnNode column = dependentTarget.getDirectSourceColumns().get(0);
             builder.addColumn(column);
             builder.addEdge(new LineageGraphEdge(
                     column.getNodeId(),
@@ -1794,11 +1803,15 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
             List<ColumnInstanceNode> sinkColumnInstances,
             GraphBuilder builder,
             ResolutionContext resolutionContext,
+            List<ColumnNode> directSourceColumns,
             List<ColumnNode> precomputedSourceColumns,
             boolean forceExpressionNode
     ) {
         if (!forceExpressionNode && expression instanceof AttributeReference) {
-            ColumnNode column = toSourceColumn((AttributeReference) expression, resolutionContext);
+            ColumnNode column = firstDirectSourceColumn(
+                    directSourceColumns,
+                    toSourceColumn((AttributeReference) expression, resolutionContext)
+            );
             builder.addColumn(column);
             builder.addEdge(new LineageGraphEdge(
                     column.getNodeId(),
@@ -1811,7 +1824,10 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
             return;
         }
         if (!forceExpressionNode && expression instanceof UnresolvedAttribute) {
-            ColumnNode column = toSourceColumn((UnresolvedAttribute) expression, resolutionContext);
+            ColumnNode column = firstDirectSourceColumn(
+                    directSourceColumns,
+                    toSourceColumn((UnresolvedAttribute) expression, resolutionContext)
+            );
             builder.addColumn(column);
             builder.addEdge(new LineageGraphEdge(
                     column.getNodeId(),
@@ -1828,12 +1844,17 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                 expressionNodeId(sinkNodeId, expression),
                 expression.prettyName(),
                 safeExpressionSql(expression),
-                normalizeExpression(expression)
+                normalizeExpression(expression),
+                classifyExpressionCategory(expression),
+                safeExpressionSql(expression),
+                isBlackBoxExpression(expression),
+                scopeNodeId,
+                operatorInstanceId
         );
         builder.addExpression(expressionNode);
         if (scopeNodeId != null) {
             builder.addEdge(new LineageGraphEdge(
-                    scopeNodeId,
+                scopeNodeId,
                     expressionNode.getNodeId(),
                     "SCOPE_TO_EXPRESSION",
                     "scope_expression",
@@ -1883,27 +1904,70 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                     "source_column",
                     event.getEventId()
             ));
-            if (scopeNodeId != null) {
-                for (ColumnInstanceNode columnInstanceNode : createColumnInstances(
-                        event,
-                        scopeNodeId,
-                        sourceColumn,
-                        "EXPRESSION_INPUT",
-                        "expression_input",
-                        null,
-                        builder
-                )) {
-                    builder.addEdge(new LineageGraphEdge(
-                            columnInstanceNode.getNodeId(),
-                            expressionNode.getNodeId(),
-                            "COLUMN_INSTANCE_TO_EXPRESSION",
-                            "source_column_instance",
-                            event.getEventId()
-                    ));
+        }
+        connectExpressionInputInstances(
+                event,
+                scopeNodeId,
+                expressionNode.getNodeId(),
+                directSourceColumns,
+                sourceColumns.values(),
+                builder
+        );
+        collectLiteralNodes(expression, expressionNode.getNodeId(), builder, event, "LITERAL_TO_EXPRESSION", "literal");
+    }
+
+    private ColumnNode firstDirectSourceColumn(List<ColumnNode> directSourceColumns, ColumnNode fallbackColumn) {
+        if (directSourceColumns != null && !directSourceColumns.isEmpty()) {
+            return directSourceColumns.get(0);
+        }
+        return fallbackColumn;
+    }
+
+    private void connectExpressionInputInstances(
+            ExecutionCaptureEvent event,
+            String scopeNodeId,
+            String expressionNodeId,
+            List<ColumnNode> directSourceColumns,
+            Iterable<ColumnNode> fallbackSourceColumns,
+            GraphBuilder builder
+    ) {
+        if (scopeNodeId == null || expressionNodeId == null) {
+            return;
+        }
+        LinkedHashMap<String, ColumnNode> inputColumns = new LinkedHashMap<>();
+        if (directSourceColumns != null) {
+            for (ColumnNode directSourceColumn : directSourceColumns) {
+                if (directSourceColumn != null) {
+                    inputColumns.put(directSourceColumn.getNodeId(), directSourceColumn);
                 }
             }
         }
-        collectLiteralNodes(expression, expressionNode.getNodeId(), builder, event, "LITERAL_TO_EXPRESSION", "literal");
+        if (inputColumns.isEmpty() && fallbackSourceColumns != null) {
+            for (ColumnNode fallbackSourceColumn : fallbackSourceColumns) {
+                if (fallbackSourceColumn != null) {
+                    inputColumns.put(fallbackSourceColumn.getNodeId(), fallbackSourceColumn);
+                }
+            }
+        }
+        for (ColumnNode inputColumn : inputColumns.values()) {
+            for (ColumnInstanceNode columnInstanceNode : createColumnInstances(
+                    event,
+                    scopeNodeId,
+                    inputColumn,
+                    "EXPRESSION_INPUT",
+                    "expression_input",
+                    null,
+                    builder
+            )) {
+                builder.addEdge(new LineageGraphEdge(
+                        columnInstanceNode.getNodeId(),
+                        expressionNodeId,
+                        "COLUMN_INSTANCE_TO_EXPRESSION",
+                        "source_column_instance",
+                        event.getEventId()
+                ));
+            }
+        }
     }
 
     private void connectDirectSourceToOutputColumnInstances(
@@ -2061,6 +2125,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
             TableRef tableRef,
             String aliasName,
             String planNodeName,
+            String planNodeId,
             GraphBuilder builder
     ) {
         RelationInstanceNode relationInstanceNode = new RelationInstanceNode(
@@ -2070,7 +2135,12 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                 tableRef.normalizedName(),
                 tableRef.getSourceType(),
                 aliasName,
-                planNodeName
+                planNodeName,
+                scopeNodeId,
+                planNodeId,
+                null,
+                null,
+                false
         );
         builder.addRelationInstance(relationInstanceNode);
         builder.addEdge(new LineageGraphEdge(
@@ -2096,6 +2166,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
             String path,
             String relationName,
             String planNodeName,
+            String planNodeId,
             GraphBuilder builder
     ) {
         String normalizedRelationName = normalizeIdentifierToken(relationName);
@@ -2106,7 +2177,12 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                 normalizedRelationName,
                 "named_plan",
                 normalizedRelationName,
-                planNodeName
+                planNodeName,
+                scopeNodeId,
+                planNodeId,
+                null,
+                null,
+                true
         );
         builder.addRelationInstance(relationInstanceNode);
         builder.addEdge(new LineageGraphEdge(
@@ -2163,11 +2239,101 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
         return "join_input_" + index;
     }
 
-    private String normalizePredicateRole(String predicateType) {
-        if (predicateType == null || predicateType.trim().isEmpty()) {
+    private String classifyColumnInstanceRole(String instanceType, String role) {
+        String normalizedInstanceType = normalizeIdentifierToken(instanceType);
+        String normalizedRole = normalizeIdentifierToken(role);
+        if ("output".equals(normalizedInstanceType)) {
+            return "output";
+        }
+        if ("predicate_input".equals(normalizedInstanceType) || normalizedRole.contains("predicate")) {
+            return "source";
+        }
+        if (normalizedRole.contains("group")) {
+            return "group_key";
+        }
+        if (normalizedRole.contains("aggregate")) {
+            return "agg_input";
+        }
+        if ("expression_input".equals(normalizedInstanceType)) {
+            return "source";
+        }
+        return "derived";
+    }
+
+    private String normalizePredicateRole(String predicateType, String planNodeName) {
+        String normalized = normalizeIdentifierToken(predicateType);
+        if (normalized.isEmpty()) {
+            normalized = normalizeIdentifierToken(planNodeName);
+        }
+        if (normalized.endsWith("_condition")) {
+            normalized = normalized.substring(0, normalized.length() - "_condition".length());
+        }
+        if ("filter".equals(normalized) || "where".equals(normalized)) {
+            return "where";
+        }
+        if ("join".equals(normalized) || "join_on".equals(normalized)) {
+            return "join_on";
+        }
+        if ("having".equals(normalized)) {
+            return "having";
+        }
+        if ("qualify".equals(normalized)) {
+            return "qualify";
+        }
+        if (!normalized.isEmpty()) {
+            return normalized;
+        }
+        return "predicate";
+    }
+
+    private String predicateEdgeRole(String predicateRole) {
+        if (predicateRole == null || predicateRole.trim().isEmpty()) {
             return "predicate_condition";
         }
-        return normalizeIdentifierToken(predicateType) + "_condition";
+        if ("where".equals(predicateRole)) {
+            return "filter_condition";
+        }
+        if ("join_on".equals(predicateRole)) {
+            return "join_condition";
+        }
+        return predicateRole + "_condition";
+    }
+
+    private String classifyExpressionCategory(Expression expression) {
+        if (expression == null) {
+            return "projection";
+        }
+        if (expression instanceof CaseWhen || expression instanceof If) {
+            return "case_when";
+        }
+        if (expression instanceof AggregateExpression) {
+            return "aggregate";
+        }
+        if (expression instanceof WindowExpression) {
+            return "window";
+        }
+        if (expression instanceof Cast) {
+            return "cast";
+        }
+        String prettyName = normalizeIdentifierToken(expression.prettyName());
+        if ("coalesce".equals(prettyName)) {
+            return "coalesce";
+        }
+        if (prettyName.contains("udf")) {
+            return "udf";
+        }
+        if ("alias".equals(prettyName) || "attributereference".equals(prettyName) || "unresolvedattribute".equals(prettyName)) {
+            return "projection";
+        }
+        return "arithmetic";
+    }
+
+    private boolean isBlackBoxExpression(Expression expression) {
+        if (expression == null) {
+            return false;
+        }
+        String category = classifyExpressionCategory(expression);
+        return "udf".equals(category);
     }
 
     private String describeOperatorSubType(LogicalPlan plan) {
@@ -2214,6 +2380,19 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
             Integer ordinal,
             GraphBuilder builder
     ) {
+        return createColumnInstances(event, scopeNodeId, columnNode, instanceType, role, ordinal, null, builder);
+    }
+
+    private List<ColumnInstanceNode> createColumnInstances(
+            ExecutionCaptureEvent event,
+            String scopeNodeId,
+            ColumnNode columnNode,
+            String instanceType,
+            String role,
+            Integer ordinal,
+            String planNodeId,
+            GraphBuilder builder
+    ) {
         if (scopeNodeId == null || columnNode == null) {
             return Collections.emptyList();
         }
@@ -2228,6 +2407,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                     instanceType,
                     role,
                     ordinal,
+                    planNodeId,
                     builder
             ));
             return instances;
@@ -2241,6 +2421,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                     instanceType,
                     role,
                     ordinal,
+                    planNodeId,
                     builder
             ));
         }
@@ -2257,6 +2438,30 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
             Integer ordinal,
             GraphBuilder builder
     ) {
+        return registerColumnInstance(
+                event,
+                scopeNodeId,
+                relationInstanceNode,
+                columnNode,
+                instanceType,
+                role,
+                ordinal,
+                null,
+                builder
+        );
+    }
+
+    private ColumnInstanceNode registerColumnInstance(
+            ExecutionCaptureEvent event,
+            String scopeNodeId,
+            RelationInstanceNode relationInstanceNode,
+            ColumnNode columnNode,
+            String instanceType,
+            String role,
+            Integer ordinal,
+            String planNodeId,
+            GraphBuilder builder
+    ) {
         String relationInstanceId = relationInstanceNode == null ? null : relationInstanceNode.getNodeId();
         ColumnInstanceNode columnInstanceNode = new ColumnInstanceNode(
                 columnInstanceNodeId(scopeNodeId, relationInstanceId, columnNode, instanceType, ordinal),
@@ -2266,7 +2471,11 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                 relationInstanceId,
                 instanceType,
                 columnNode.getDataType(),
-                ordinal
+                ordinal,
+                classifyColumnInstanceRole(instanceType, role),
+                "OUTPUT".equalsIgnoreCase(instanceType),
+                scopeNodeId,
+                planNodeId
         );
         builder.addColumnInstance(columnInstanceNode);
         builder.addEdge(new LineageGraphEdge(
@@ -2515,28 +2724,32 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                 NamedExpression expression = (NamedExpression) projectItem;
                 Expression originalExpression = asExpression(expression);
                 TargetExpression forwardedTarget = resolveForwardedChildTarget(originalExpression, scope);
+                Expression lineageExpression = originalExpression;
                 Expression resolvedExpression = forwardedTarget == null
                         ? resolveProjectedExpression(originalExpression, scope)
                         : resolveResolvedChildExpression(originalExpression, forwardedTarget.getExpression(), scope);
                 targets.add(new TargetExpression(
                         safeTargetName(expression, originalExpression),
                         safeTargetDataType(expression),
-                        resolvedExpression,
+                        lineageExpression,
                         exprIdOf(expression),
+                        resolveDirectSourceColumns(lineageExpression, scope, resolutionContext),
                         resolveProjectedSources(resolvedExpression, forwardedTarget, scope, resolutionContext),
                         resolveProjectedDependencies(resolvedExpression, forwardedTarget, scope)
                 ));
             } else if (projectItem instanceof Expression) {
                 Expression expression = (Expression) projectItem;
                 TargetExpression forwardedTarget = resolveForwardedChildTarget(expression, scope);
+                Expression lineageExpression = expression;
                 Expression resolvedExpression = forwardedTarget == null
                         ? resolveProjectedExpression(expression, scope)
                         : resolveResolvedChildExpression(expression, forwardedTarget.getExpression(), scope);
                 targets.add(new TargetExpression(
                         safeTargetName(expression),
                         safeTargetDataType(expression),
-                        resolvedExpression,
+                        lineageExpression,
                         exprIdOf(expression),
+                        resolveDirectSourceColumns(lineageExpression, scope, resolutionContext),
                         resolveProjectedSources(resolvedExpression, forwardedTarget, scope, resolutionContext),
                         resolveProjectedDependencies(resolvedExpression, forwardedTarget, scope)
                 ));
@@ -2562,8 +2775,9 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
             targets.add(new TargetExpression(
                     safeTargetName(expression, originalExpression),
                     safeTargetDataType(expression),
-                    resolvedExpression,
+                    originalExpression,
                     exprIdOf(expression),
+                    resolveDirectSourceColumns(originalExpression, scope, resolutionContext),
                     resolvedSources,
                     resolveDependentTargets(resolvedExpression, scope)
             ));
@@ -2628,6 +2842,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                     dataType,
                     expression,
                     exprId,
+                    seed == null ? Collections.<ColumnNode>emptyList() : seed.getDirectSourceColumns(),
                     new ArrayList<>(mergedSources.values()),
                     new ArrayList<>(mergedDependencies.values())
             ));
@@ -2854,6 +3069,48 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
             return forwardedTarget.getSourceColumns();
         }
         return resolveSourceColumns(resolvedExpression, scope, resolutionContext);
+    }
+
+    private List<ColumnNode> resolveDirectSourceColumns(
+            Expression expression,
+            TargetScope scope,
+            ResolutionContext resolutionContext
+    ) {
+        LinkedHashMap<String, ColumnNode> sourceColumns = new LinkedHashMap<>();
+        collectDirectSourceColumns(expression, sourceColumns, scope, resolutionContext);
+        return new ArrayList<>(sourceColumns.values());
+    }
+
+    private void collectDirectSourceColumns(
+            Expression expression,
+            LinkedHashMap<String, ColumnNode> sourceColumns,
+            TargetScope scope,
+            ResolutionContext resolutionContext
+    ) {
+        if (expression == null) {
+            return;
+        }
+        if (expression instanceof Alias) {
+            collectDirectSourceColumns(((Alias) expression).child(), sourceColumns, scope, resolutionContext);
+            return;
+        }
+        if (expression instanceof Cast) {
+            collectDirectSourceColumns(((Cast) expression).child(), sourceColumns, scope, resolutionContext);
+            return;
+        }
+        if (expression instanceof AttributeReference) {
+            ColumnNode column = toSourceColumn((AttributeReference) expression, resolutionContext, scope.defaultSourceTable);
+            sourceColumns.put(column.getNodeId(), column);
+            return;
+        }
+        if (expression instanceof UnresolvedAttribute) {
+            ColumnNode column = toSourceColumn((UnresolvedAttribute) expression, resolutionContext, scope.defaultSourceTable);
+            sourceColumns.put(column.getNodeId(), column);
+            return;
+        }
+        for (Expression child : ScalaInterop.toJavaList(expression.children())) {
+            collectDirectSourceColumns(child, sourceColumns, scope, resolutionContext);
+        }
     }
 
     private List<TargetExpression> resolveProjectedDependencies(
@@ -3187,6 +3444,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                     outputType,
                     target.getExpression(),
                     target.getExprId(),
+                    target.getDirectSourceColumns(),
                     target.getSourceColumns(),
                     target.getDependentTargets()
             ));
@@ -3366,6 +3624,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
         private final String dataType;
         private final Expression expression;
         private final Object exprId;
+        private final List<ColumnNode> directSourceColumns;
         private final List<ColumnNode> sourceColumns;
         private final List<TargetExpression> dependentTargets;
 
@@ -3374,6 +3633,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                 String dataType,
                 Expression expression,
                 Object exprId,
+                List<ColumnNode> directSourceColumns,
                 List<ColumnNode> sourceColumns,
                 List<TargetExpression> dependentTargets
         ) {
@@ -3381,6 +3641,9 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
             this.dataType = dataType;
             this.expression = expression;
             this.exprId = exprId;
+            this.directSourceColumns = directSourceColumns == null
+                    ? Collections.<ColumnNode>emptyList()
+                    : new ArrayList<>(directSourceColumns);
             this.sourceColumns = sourceColumns == null ? Collections.<ColumnNode>emptyList() : new ArrayList<>(sourceColumns);
             this.dependentTargets = dependentTargets == null ? Collections.<TargetExpression>emptyList() : new ArrayList<>(dependentTargets);
         }
@@ -3392,6 +3655,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                     expression instanceof Expression ? (Expression) expression : expression.toAttribute(),
                     expression.exprId(),
                     Collections.<ColumnNode>emptyList(),
+                    Collections.<ColumnNode>emptyList(),
                     Collections.<TargetExpression>emptyList()
             );
         }
@@ -3402,6 +3666,7 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
                     safeDataType(attribute),
                     (Expression) attribute,
                     attribute.exprId(),
+                    Collections.<ColumnNode>emptyList(),
                     Collections.<ColumnNode>emptyList(),
                     Collections.<TargetExpression>emptyList()
             );
@@ -3437,6 +3702,10 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
 
         private Object getExprId() {
             return exprId;
+        }
+
+        private List<ColumnNode> getDirectSourceColumns() {
+            return new ArrayList<>(directSourceColumns);
         }
 
         private List<ColumnNode> getSourceColumns() {
@@ -3660,6 +3929,10 @@ public final class DefaultSparkLineageParser implements SparkLineageParser {
 
         private List<RelationInstanceNode> relationInstances() {
             return new ArrayList<>(relationInstances.values());
+        }
+
+        private RelationInstanceNode findRelationInstance(String relationInstanceId) {
+            return relationInstances.get(relationInstanceId);
         }
 
         private List<RelationInstanceNode> findRelationInstances(String scopeNodeId, ColumnNode columnNode) {
