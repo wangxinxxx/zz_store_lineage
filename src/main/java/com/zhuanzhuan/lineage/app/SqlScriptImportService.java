@@ -118,6 +118,12 @@ public final class SqlScriptImportService implements AutoCloseable {
                 .appName("sql-script-import-service")
                 .master("local[1]")
                 .config("spark.ui.enabled", "true")
+                .config("spark.executor.heartbeatInterval", "60s")
+                .config("spark.network.timeout", "1800s")
+                .config("spark.rpc.askTimeout", "1800s")
+                .config("spark.sql.broadcastTimeout", "1800")
+                .config("spark.sql.maxPlanStringLength", "1048576")
+                .config("spark.sql.debug.maxToStringFields", "1048576")
                 .config("spark.sql.warehouse.dir", warehouseDir.toAbsolutePath().toString())
                 .config("hive.metastore.uris", "thrift://hive-metsatore2.58dns.org:9083");
 
@@ -261,18 +267,20 @@ public final class SqlScriptImportService implements AutoCloseable {
         LogicalPlan analysisPlan = insert == null
                 ? logicalPlan
                 : parsePlan(stripInsertClause(sql));
-        LogicalPlan analyzedPlan = analyzePlan(analysisPlan);
-        return new AnalysisBundle(logicalPlan, analyzedPlan, analyzedPlan);
+        AnalysisBundle analysisBundle = analyzePlanBundle(logicalPlan, analysisPlan);
+        debugBreakpoint(analysisBundle);
+        return analysisBundle;
     }
 
-    private LogicalPlan analyzePlan(LogicalPlan planToExecute) {
+    private AnalysisBundle analyzePlanBundle(LogicalPlan logicalPlan, LogicalPlan planToExecute) {
         Object sessionState = invokeNoArg(spark, "sessionState");
         Object queryExecution = invokeCompatibleOneArg(sessionState, "executePlan", planToExecute);
 
         if (queryExecution != null) {
             LogicalPlan analyzedPlan = asLogicalPlan(invokeNoArg(queryExecution, "analyzed"));
             if (analyzedPlan != null) {
-                return analyzedPlan;
+                LogicalPlan finalAnalyzedPlan = analyzedPlan == null ? planToExecute : analyzedPlan;
+                return new AnalysisBundle(logicalPlan, finalAnalyzedPlan, null);
             }
         }
 
@@ -282,7 +290,21 @@ public final class SqlScriptImportService implements AutoCloseable {
         if (analyzedPlan == null) {
             analyzedPlan = planToExecute;
         }
-        return analyzedPlan;
+        return new AnalysisBundle(logicalPlan, analyzedPlan, null);
+    }
+
+    private void debugBreakpoint(AnalysisBundle analysisBundle) {
+        PlanDebugSnapshot debugSnapshot = new PlanDebugSnapshot(
+                analysisBundle.logicalPlan,
+                analysisBundle.analyzedPlan,
+                analysisBundle.optimizedPlan,
+                planText(analysisBundle.logicalPlan),
+                planText(analysisBundle.analyzedPlan),
+                planText(analysisBundle.optimizedPlan)
+        );
+        if (debugSnapshot == null) {
+            throw new IllegalStateException("Unreachable debug guard.");
+        }
     }
 
     private String stripInsertClause(String sql) {
@@ -742,6 +764,31 @@ public final class SqlScriptImportService implements AutoCloseable {
             this.logicalPlan = logicalPlan;
             this.analyzedPlan = analyzedPlan;
             this.optimizedPlan = optimizedPlan;
+        }
+    }
+
+    private static final class PlanDebugSnapshot {
+        private final LogicalPlan logicalPlan;
+        private final LogicalPlan analyzedPlan;
+        private final LogicalPlan optimizedPlan;
+        private final String logicalPlanText;
+        private final String analyzedPlanText;
+        private final String optimizedPlanText;
+
+        private PlanDebugSnapshot(
+                LogicalPlan logicalPlan,
+                LogicalPlan analyzedPlan,
+                LogicalPlan optimizedPlan,
+                String logicalPlanText,
+                String analyzedPlanText,
+                String optimizedPlanText
+        ) {
+            this.logicalPlan = logicalPlan;
+            this.analyzedPlan = analyzedPlan;
+            this.optimizedPlan = optimizedPlan;
+            this.logicalPlanText = logicalPlanText;
+            this.analyzedPlanText = analyzedPlanText;
+            this.optimizedPlanText = optimizedPlanText;
         }
     }
 
