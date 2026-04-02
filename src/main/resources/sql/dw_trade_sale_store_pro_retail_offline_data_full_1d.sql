@@ -1,13 +1,14 @@
 
 
+
 SET spark.sql.adaptive.enabled=false;
 
 
-    --drop table if exists hdp_ubu_zhuanzhuan_tmp_c2b.tmp_pro_store_sale_order_info;
-    --create table hdp_ubu_zhuanzhuan_tmp_c2b.tmp_pro_store_sale_order_info as
-    insert overwrite table hdp_ubu_zhuanzhuan_dw_c2b.dw_trade_sale_store_pro_retail_offline_data_full_1d partition(dt='${outFileSuffix}')
+--drop table if exists hdp_ubu_zhuanzhuan_tmp_c2b.tmp_pro_store_sale_order_info;
+--create table hdp_ubu_zhuanzhuan_tmp_c2b.tmp_pro_store_sale_order_info as
+insert overwrite table hdp_ubu_zhuanzhuan_dw_c2b.dw_trade_sale_store_pro_retail_offline_data_full_1d partition(dt='${outFileSuffix}')
 select
-    /*+ COALESCE(1) */
+/*+ COALESCE(1) */
     t3.province
      ,t3.region
      ,t3.first_opening_time
@@ -191,11 +192,21 @@ from
         left join
     (
         select
-            distinct
-            cate_id
+            cate_id,
+            1 as rn
         from
             hdp_zhuanzhuan_rawdb_global.raw_mysql_dbzz_offline_sales_t_fittings_spu_full_1d
         where dt = '${outFileSuffix}'
+
+        union all
+
+        select
+            explode(array(1,2)) as cate_id,
+            sum(1) over(partition by cate_id,id order by spu_id) as rn
+        from
+            hdp_zhuanzhuan_rawdb_global.raw_mysql_dbzz_offline_sales_t_fittings_spu_full_1d
+        where dt = '${outFileSuffix}'
+          -- having rn > 2
     )t5
     on t1.cate_id = t5.cate_id
 
