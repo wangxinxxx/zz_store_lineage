@@ -8,7 +8,7 @@ import java.nio.file.Paths;
 
 public class StartDemo {
     public static void main(String[] args) throws IOException {
-        Path sqlPath = Paths.get("C:\\Users\\w\\IdeaProjects\\zz_store_lineage\\src\\main\\resources\\sql\\dw_trade_sale_store_pro_retail_offline_data_full_1d.sql");
+        Path sqlPath = Paths.get("src/main/resources/sql/dw_trade_sale_store_pro_retail_offline_data_full_1d.sql");
 
         try (SqlScriptImportService service = SqlScriptImportService.createParserOnly()) {
             NebulaImporterBundleWriter.BundleSummary summary = service.exportImporterBundle(sqlPath);

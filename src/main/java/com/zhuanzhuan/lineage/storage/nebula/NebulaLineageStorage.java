@@ -99,69 +99,19 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
     }
 
     public static List<String> buildCaptureStatements(ExecutionCaptureEvent event) {
-        List<String> statements = new ArrayList<String>();
-        String captureVid = captureVid(event.getEventId());
-        statements.add(upsertCaptureEventVertex(event));
-
-        if (event.getTaskContext().getTaskId() != null) {
-            statements.add(upsertTaskVertex(event));
-            statements.add(insertEdge(
-                    "task_has_execution",
-                    taskVid(event.getTaskContext().getTaskId()),
-                    captureVid,
-                    edgeRank(event.getEventId(), "task_has_execution"),
-                    quote(event.getEventId()),
-                    quoteLong(event.getCaptureTimeEpochMs() / 1000L)
-            ));
-        }
-
-        String runId = event.getTaskContext().getRunId();
-        if (runId != null) {
-            statements.add(upsertRunVertex(event));
-            if (event.getTaskContext().getTaskId() != null) {
-                statements.add(insertEdge(
-                        "task_has_run",
-                        taskVid(event.getTaskContext().getTaskId()),
-                        runVid(runId),
-                        edgeRank(event.getTaskContext().getTaskId(), runId, "task_has_run"),
-                        quote(runId),
-                        quoteLong(event.getCaptureTimeEpochMs() / 1000L)
-                ));
-            }
-            statements.add(insertEdge(
-                    "run_has_execution",
-                    runVid(runId),
-                    captureVid,
-                    edgeRank(event.getEventId(), "run_has_execution"),
-                    quote(event.getEventId()),
-                    quoteLong(event.getCaptureTimeEpochMs() / 1000L)
-            ));
-        }
-        return statements;
+        return new ArrayList<String>();
     }
 
     public static List<String> buildLineageStatements(NormalizedLineageResult result) {
         List<String> statements = new ArrayList<String>();
         Set<String> writtenNodeIds = new LinkedHashSet<>();
-        String captureVid = captureVid(result.getEventId());
         Set<String> knownTableOwners = new LinkedHashSet<>();
-
-        statements.add(upsertCaptureEventVertex(result));
-        statements.add(updateCaptureEventVertex(result));
 
         for (TableRef tableRef : result.getInputTables()) {
             statements.add(upsertTableVertex(tableRef));
             String vid = tableVid(tableRef);
             writtenNodeIds.add(vid);
             knownTableOwners.add(vid);
-            statements.add(insertEdge(
-                    "execution_reads_table",
-                    captureVid,
-                    vid,
-                    edgeRank(result.getEventId(), captureVid, vid, "execution_reads_table"),
-                    quote(result.getEventId()),
-                    quoteLong(result.getCaptureTimeEpochMs() / 1000L)
-            ));
         }
         for (TableRef tableRef : result.getOutputTables()) {
             String vid = tableVid(tableRef);
@@ -169,28 +119,12 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 statements.add(upsertTableVertex(tableRef));
             }
             knownTableOwners.add(vid);
-            statements.add(insertEdge(
-                    "execution_writes_table",
-                    captureVid,
-                    vid,
-                    edgeRank(result.getEventId(), captureVid, vid, "execution_writes_table"),
-                    quote(result.getEventId()),
-                    quoteLong(result.getCaptureTimeEpochMs() / 1000L)
-            ));
         }
 
         for (ColumnNode columnNode : result.getColumnNodes()) {
             if (writtenNodeIds.add(columnNode.getNodeId())) {
                 statements.add(upsertColumnVertex(columnNode));
             }
-            statements.add(insertEdge(
-                    "execution_emits_column",
-                    captureVid,
-                    columnNode.getNodeId(),
-                    edgeRank(result.getEventId(), captureVid, columnNode.getNodeId(), "execution_emits_column"),
-                    quote(result.getEventId()),
-                    quoteLong(result.getCaptureTimeEpochMs() / 1000L)
-            ));
             String ownerVid = tableOwnerVid(columnNode);
             if (ownerVid != null && knownTableOwners.contains(ownerVid)) {
                 statements.add(insertEdgeIfNotExists(
@@ -206,146 +140,29 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
             if (writtenNodeIds.add(expressionNode.getNodeId())) {
                 statements.add(upsertExpressionVertex(expressionNode));
             }
-            statements.add(insertEdge(
-                    "execution_observes_expression",
-                    captureVid,
-                    expressionNode.getNodeId(),
-                    edgeRank(result.getEventId(), captureVid, expressionNode.getNodeId(), "execution_observes_expression"),
-                    quote(result.getEventId()),
-                    quoteLong(result.getCaptureTimeEpochMs() / 1000L)
-            ));
-        }
-
-        for (ScopeNode scopeNode : result.getScopeNodes()) {
-            if (writtenNodeIds.add(scopeNode.getNodeId())) {
-                statements.add(upsertScopeVertex(scopeNode));
-            }
-            statements.add(insertEdge(
-                    "execution_observes_scope",
-                    captureVid,
-                    scopeNode.getNodeId(),
-                    edgeRank(result.getEventId(), captureVid, scopeNode.getNodeId(), "execution_observes_scope"),
-                    quote(result.getEventId()),
-                    quoteLong(result.getCaptureTimeEpochMs() / 1000L)
-            ));
         }
 
         for (LiteralNode literalNode : result.getLiteralNodes()) {
             if (writtenNodeIds.add(literalNode.getNodeId())) {
                 statements.add(upsertLiteralVertex(literalNode));
             }
-            statements.add(insertEdge(
-                    "execution_observes_literal",
-                    captureVid,
-                    literalNode.getNodeId(),
-                    edgeRank(result.getEventId(), captureVid, literalNode.getNodeId(), "execution_observes_literal"),
-                    quote(result.getEventId()),
-                    quoteLong(result.getCaptureTimeEpochMs() / 1000L)
-            ));
-        }
-
-        for (OperatorInstanceNode operatorInstanceNode : result.getOperatorInstanceNodes()) {
-            if (writtenNodeIds.add(operatorInstanceNode.getNodeId())) {
-                statements.add(upsertOperatorInstanceVertex(operatorInstanceNode));
-            }
-            statements.add(insertEdge(
-                    "execution_observes_operator_instance",
-                    captureVid,
-                    operatorInstanceNode.getNodeId(),
-                    edgeRank(result.getEventId(), captureVid, operatorInstanceNode.getNodeId(), "execution_observes_operator_instance"),
-                    quote(result.getEventId()),
-                    quoteLong(result.getCaptureTimeEpochMs() / 1000L)
-            ));
         }
 
         for (ColumnInstanceNode columnInstanceNode : result.getColumnInstanceNodes()) {
             if (writtenNodeIds.add(columnInstanceNode.getNodeId())) {
                 statements.add(upsertColumnInstanceVertex(columnInstanceNode));
             }
-            statements.add(insertEdge(
-                    "execution_observes_column_instance",
-                    captureVid,
-                    columnInstanceNode.getNodeId(),
-                    edgeRank(result.getEventId(), captureVid, columnInstanceNode.getNodeId(), "execution_observes_column_instance"),
-                    quote(result.getEventId()),
-                    quoteLong(result.getCaptureTimeEpochMs() / 1000L)
-            ));
         }
 
         for (RelationInstanceNode relationInstanceNode : result.getRelationInstanceNodes()) {
             if (writtenNodeIds.add(relationInstanceNode.getNodeId())) {
                 statements.add(upsertRelationInstanceVertex(relationInstanceNode));
             }
-            statements.add(insertEdge(
-                    "execution_observes_relation_instance",
-                    captureVid,
-                    relationInstanceNode.getNodeId(),
-                    edgeRank(result.getEventId(), captureVid, relationInstanceNode.getNodeId(), "execution_observes_relation_instance"),
-                    quote(result.getEventId()),
-                    quoteLong(result.getCaptureTimeEpochMs() / 1000L)
-            ));
         }
 
         for (PredicateNode predicateNode : result.getPredicateNodes()) {
             if (writtenNodeIds.add(predicateNode.getNodeId())) {
                 statements.add(upsertPredicateVertex(predicateNode));
-            }
-            statements.add(insertEdge(
-                    "execution_observes_predicate",
-                    captureVid,
-                    predicateNode.getNodeId(),
-                    edgeRank(result.getEventId(), captureVid, predicateNode.getNodeId(), "execution_observes_predicate"),
-                    quote(result.getEventId()),
-                    quoteLong(result.getCaptureTimeEpochMs() / 1000L)
-            ));
-        }
-
-        for (TableLineageEdge tableEdge : result.getTableEdges()) {
-            String sourceVid = tableVid(tableEdge.getSourceTable());
-            String targetVid = tableVid(tableEdge.getTargetTable());
-            statements.add(insertEdge(
-                    "table_flows_to_table",
-                    sourceVid,
-                    targetVid,
-                    edgeRank(tableEdge.getEventId(), sourceVid, targetVid, "table_flows_to_table"),
-                    quote(tableEdge.getEventId()),
-                    nullableQuote(tableEdge.getTaskId()),
-                    nullableQuote(tableEdge.getRunId()),
-                    nullableQuote(tableEdge.getWriteMode()),
-                    quoteLong(tableEdge.getCaptureTimeEpochMs() / 1000L),
-                    nullableQuote(tableEdge.getConfidence())
-            ));
-            statements.addAll(replaceLatestEdge(
-                    "latest_table_flows_to_table",
-                    sourceVid,
-                    targetVid,
-                    nullableQuote(tableEdge.getEventId()),
-                    nullableQuote(tableEdge.getTaskId()),
-                    nullableQuote(tableEdge.getRunId()),
-                    nullableQuote(tableEdge.getWriteMode()),
-                    quoteLong(tableEdge.getCaptureTimeEpochMs() / 1000L),
-                    nullableQuote(tableEdge.getConfidence())
-            ));
-
-            if (tableEdge.getTaskId() != null) {
-                statements.add(insertEdge(
-                        "task_reads_table",
-                        taskVid(tableEdge.getTaskId()),
-                        sourceVid,
-                        edgeRank(tableEdge.getEventId(), tableEdge.getTaskId(), tableEdge.getSourceTable().normalizedName(), "task_reads_table"),
-                        quote(tableEdge.getEventId()),
-                        nullableQuote(tableEdge.getRunId()),
-                        quoteLong(tableEdge.getCaptureTimeEpochMs() / 1000L)
-                ));
-                statements.add(insertEdge(
-                        "task_writes_table",
-                        taskVid(tableEdge.getTaskId()),
-                        targetVid,
-                        edgeRank(tableEdge.getEventId(), tableEdge.getTaskId(), tableEdge.getTargetTable().normalizedName(), "task_writes_table"),
-                        quote(tableEdge.getEventId()),
-                        nullableQuote(tableEdge.getRunId()),
-                        quoteLong(tableEdge.getCaptureTimeEpochMs() / 1000L)
-                ));
             }
         }
 
@@ -956,123 +773,6 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
         String role = nullableQuote(graphEdge.getRole());
 
         switch (graphEdge.getEdgeType()) {
-            case "SCOPE_TO_SCOPE":
-                return structuralEdges(
-                        "scope_contains_scope",
-                        graphEdge.getSourceNodeId(),
-                        graphEdge.getTargetNodeId(),
-                        eventId,
-                        captureTime,
-                        role
-                );
-            case "SCOPE_TO_COLUMN":
-                return structuralEdges(
-                        "scope_outputs_column",
-                        graphEdge.getSourceNodeId(),
-                        graphEdge.getTargetNodeId(),
-                        eventId,
-                        captureTime,
-                        role
-                );
-            case "SCOPE_TO_EXPRESSION":
-                return structuralEdges(
-                        "scope_uses_expression",
-                        graphEdge.getSourceNodeId(),
-                        graphEdge.getTargetNodeId(),
-                        eventId,
-                        captureTime,
-                        role
-                );
-            case "SCOPE_TO_OPERATOR_INSTANCE":
-                return structuralEdges(
-                        "scope_contains_operator_instance",
-                        graphEdge.getSourceNodeId(),
-                        graphEdge.getTargetNodeId(),
-                        eventId,
-                        captureTime,
-                        role
-                );
-            case "OPERATOR_TO_OPERATOR_INSTANCE":
-                return structuralEdges(
-                        "operator_precedes_operator_instance",
-                        graphEdge.getSourceNodeId(),
-                        graphEdge.getTargetNodeId(),
-                        eventId,
-                        captureTime,
-                        role
-                );
-            case "OPERATOR_TO_COLUMN_INSTANCE":
-                return structuralEdges(
-                        "operator_outputs_column_instance",
-                        graphEdge.getSourceNodeId(),
-                        graphEdge.getTargetNodeId(),
-                        eventId,
-                        captureTime,
-                        role
-                );
-            case "OPERATOR_TO_EXPRESSION":
-                return structuralEdges(
-                        "operator_uses_expression",
-                        graphEdge.getSourceNodeId(),
-                        graphEdge.getTargetNodeId(),
-                        eventId,
-                        captureTime,
-                        role
-                );
-            case "OPERATOR_TO_PREDICATE":
-                return structuralEdges(
-                        "operator_uses_predicate",
-                        graphEdge.getSourceNodeId(),
-                        graphEdge.getTargetNodeId(),
-                        eventId,
-                        captureTime,
-                        role
-                );
-            case "OPERATOR_TO_RELATION_INSTANCE":
-                return structuralEdges(
-                        "operator_reads_relation_instance",
-                        graphEdge.getSourceNodeId(),
-                        graphEdge.getTargetNodeId(),
-                        eventId,
-                        captureTime,
-                        role
-                );
-            case "SCOPE_TO_COLUMN_INSTANCE":
-                return structuralEdges(
-                        "scope_contains_column_instance",
-                        graphEdge.getSourceNodeId(),
-                        graphEdge.getTargetNodeId(),
-                        eventId,
-                        captureTime,
-                        role
-                );
-            case "SCOPE_TO_RELATION_INSTANCE":
-                return structuralEdges(
-                        "scope_reads_relation_instance",
-                        graphEdge.getSourceNodeId(),
-                        graphEdge.getTargetNodeId(),
-                        eventId,
-                        captureTime,
-                        role
-                );
-            case "RELATION_INSTANCE_TO_COLUMN_INSTANCE":
-                return structuralEdges(
-                        "relation_instance_exposes_column_instance",
-                        graphEdge.getSourceNodeId(),
-                        graphEdge.getTargetNodeId(),
-                        eventId,
-                        captureTime,
-                        role
-                );
-            case "RELATION_INSTANCE_TO_TABLE":
-                return structuralEdges(
-                        "relation_instance_of_table",
-                        graphEdge.getSourceNodeId(),
-                        graphEdge.getTargetNodeId(),
-                        eventId,
-                        captureTime,
-                        role
-                );
             case "COLUMN_TO_COLUMN_INSTANCE":
                 return structuralEdges(
                         "column_has_instance",
@@ -1082,27 +782,8 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                         captureTime,
                         role
                 );
-            case "SCOPE_TO_PREDICATE":
-                return structuralEdges(
-                        "scope_uses_predicate",
-                        graphEdge.getSourceNodeId(),
-                        graphEdge.getTargetNodeId(),
-                        eventId,
-                        captureTime,
-                        role
-                );
-            case "RELATION_INSTANCE_TO_PREDICATE":
-                return structuralEdges(
-                        "relation_instance_filtered_by_predicate",
-                        graphEdge.getSourceNodeId(),
-                        graphEdge.getTargetNodeId(),
-                        eventId,
-                        captureTime,
-                        role
-                );
             case "RELATION_INSTANCE_TO_RELATION_INSTANCE":
                 return buildLatestSemanticEdge(
-                        "relation_instance_joins_relation_instance",
                         "latest_relation_instance_joins_relation_instance",
                         graphEdge.getSourceNodeId(),
                         graphEdge.getTargetNodeId(),
@@ -1113,346 +794,104 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                         role,
                         latestSemanticRank("latest_relation_instance_joins_relation_instance", graphEdge.getRole())
                 );
-            case "COLUMN_TO_COLUMN":
-                return mergeStatements(
-                        buildDependencyEdges(
-                                "column_depends_on_column",
-                                "latest_column_depends_on_column",
-                                graphEdge.getTargetNodeId(),
-                                graphEdge.getSourceNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_column_depends_on_column", graphEdge.getRole())
-                        ),
-                        buildLatestFlowEdge(
-                                "latest_column_flows_to_column",
-                                graphEdge.getSourceNodeId(),
-                                graphEdge.getTargetNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_column_flows_to_column", graphEdge.getRole())
-                        )
-                );
-            case "COLUMN_TO_PREDICATE":
-                return mergeStatements(
-                        buildDependencyEdges(
-                                "predicate_depends_on_column",
-                                "latest_predicate_depends_on_column",
-                                graphEdge.getTargetNodeId(),
-                                graphEdge.getSourceNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_predicate_depends_on_column", graphEdge.getRole())
-                        ),
-                        buildLatestFlowEdge(
-                                "latest_column_flows_to_predicate",
-                                graphEdge.getSourceNodeId(),
-                                graphEdge.getTargetNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_column_flows_to_predicate", graphEdge.getRole())
-                        )
-                );
             case "COLUMN_INSTANCE_TO_PREDICATE":
-                return mergeStatements(
-                        buildDependencyEdges(
-                                "predicate_depends_on_column_instance",
-                                "latest_predicate_depends_on_column_instance",
-                                graphEdge.getTargetNodeId(),
-                                graphEdge.getSourceNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_predicate_depends_on_column_instance", graphEdge.getRole())
-                        ),
-                        buildLatestFlowEdge(
-                                "latest_column_instance_flows_to_predicate",
-                                graphEdge.getSourceNodeId(),
-                                graphEdge.getTargetNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_column_instance_flows_to_predicate", graphEdge.getRole())
-                        )
+                return buildLatestFlowEdge(
+                        "latest_column_instance_flows_to_predicate",
+                        graphEdge.getSourceNodeId(),
+                        graphEdge.getTargetNodeId(),
+                        eventId,
+                        taskId,
+                        runId,
+                        captureTime,
+                        role,
+                        latestSemanticRank("latest_column_instance_flows_to_predicate", graphEdge.getRole())
                 );
             case "RELATION_INSTANCE_TO_DERIVED_COLUMN_INSTANCE":
-                return mergeStatements(
-                        buildDependencyEdges(
-                                "column_instance_depends_on_relation_instance",
-                                "latest_column_instance_depends_on_relation_instance",
-                                graphEdge.getTargetNodeId(),
-                                graphEdge.getSourceNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_column_instance_depends_on_relation_instance", graphEdge.getRole())
-                        ),
-                        buildLatestFlowEdge(
-                                "latest_relation_instance_flows_to_column_instance",
-                                graphEdge.getSourceNodeId(),
-                                graphEdge.getTargetNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_relation_instance_flows_to_column_instance", graphEdge.getRole())
-                        )
+                return buildLatestFlowEdge(
+                        "latest_relation_instance_flows_to_column_instance",
+                        graphEdge.getSourceNodeId(),
+                        graphEdge.getTargetNodeId(),
+                        eventId,
+                        taskId,
+                        runId,
+                        captureTime,
+                        role,
+                        latestSemanticRank("latest_relation_instance_flows_to_column_instance", graphEdge.getRole())
                 );
             case "PREDICATE_TO_DERIVED_COLUMN_INSTANCE":
-                return mergeStatements(
-                        buildDependencyEdges(
-                                "column_instance_filtered_by_predicate",
-                                "latest_column_instance_filtered_by_predicate",
-                                graphEdge.getTargetNodeId(),
-                                graphEdge.getSourceNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_column_instance_filtered_by_predicate", graphEdge.getRole())
-                        ),
-                        buildLatestFlowEdge(
-                                "latest_predicate_flows_to_column_instance",
-                                graphEdge.getSourceNodeId(),
-                                graphEdge.getTargetNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_predicate_flows_to_column_instance", graphEdge.getRole())
-                        )
+                return buildLatestFlowEdge(
+                        "latest_predicate_flows_to_column_instance",
+                        graphEdge.getSourceNodeId(),
+                        graphEdge.getTargetNodeId(),
+                        eventId,
+                        taskId,
+                        runId,
+                        captureTime,
+                        role,
+                        latestSemanticRank("latest_predicate_flows_to_column_instance", graphEdge.getRole())
                 );
             case "EXPRESSION_TO_COLUMN_INSTANCE":
-                return mergeStatements(
-                        buildDependencyEdges(
-                                "column_instance_uses_expression",
-                                "latest_column_instance_uses_expression",
-                                graphEdge.getTargetNodeId(),
-                                graphEdge.getSourceNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_column_instance_uses_expression", graphEdge.getRole())
-                        ),
-                        buildLatestFlowEdge(
-                                "latest_expression_flows_to_column_instance",
-                                graphEdge.getSourceNodeId(),
-                                graphEdge.getTargetNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_expression_flows_to_column_instance", graphEdge.getRole())
-                        )
-                );
-            case "EXPRESSION_TO_COLUMN":
-                return mergeStatements(
-                        buildDependencyEdges(
-                                "column_uses_expression",
-                                "latest_column_uses_expression",
-                                graphEdge.getTargetNodeId(),
-                                graphEdge.getSourceNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_column_uses_expression", graphEdge.getRole())
-                        ),
-                        buildLatestFlowEdge(
-                                "latest_expression_flows_to_column",
-                                graphEdge.getSourceNodeId(),
-                                graphEdge.getTargetNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_expression_flows_to_column", graphEdge.getRole())
-                        )
-                );
-            case "COLUMN_TO_EXPRESSION":
-                return mergeStatements(
-                        buildDependencyEdges(
-                                "expression_depends_on_column",
-                                "latest_expression_depends_on_column",
-                                graphEdge.getTargetNodeId(),
-                                graphEdge.getSourceNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_expression_depends_on_column", graphEdge.getRole())
-                        ),
-                        buildLatestFlowEdge(
-                                "latest_column_flows_to_expression",
-                                graphEdge.getSourceNodeId(),
-                                graphEdge.getTargetNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_column_flows_to_expression", graphEdge.getRole())
-                        )
+                return buildLatestFlowEdge(
+                        "latest_expression_flows_to_column_instance",
+                        graphEdge.getSourceNodeId(),
+                        graphEdge.getTargetNodeId(),
+                        eventId,
+                        taskId,
+                        runId,
+                        captureTime,
+                        role,
+                        latestSemanticRank("latest_expression_flows_to_column_instance", graphEdge.getRole())
                 );
             case "COLUMN_INSTANCE_TO_EXPRESSION":
-                return mergeStatements(
-                        buildDependencyEdges(
-                                "expression_depends_on_column_instance",
-                                "latest_expression_depends_on_column_instance",
-                                graphEdge.getTargetNodeId(),
-                                graphEdge.getSourceNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_expression_depends_on_column_instance", graphEdge.getRole())
-                        ),
-                        buildLatestFlowEdge(
-                                "latest_column_instance_flows_to_expression",
-                                graphEdge.getSourceNodeId(),
-                                graphEdge.getTargetNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_column_instance_flows_to_expression", graphEdge.getRole())
-                        )
+                return buildLatestFlowEdge(
+                        "latest_column_instance_flows_to_expression",
+                        graphEdge.getSourceNodeId(),
+                        graphEdge.getTargetNodeId(),
+                        eventId,
+                        taskId,
+                        runId,
+                        captureTime,
+                        role,
+                        latestSemanticRank("latest_column_instance_flows_to_expression", graphEdge.getRole())
                 );
             case "COLUMN_INSTANCE_TO_COLUMN_INSTANCE":
-                return mergeStatements(
-                        buildDependencyEdges(
-                                "column_instance_depends_on_column_instance",
-                                "latest_column_instance_depends_on_column_instance",
-                                graphEdge.getTargetNodeId(),
-                                graphEdge.getSourceNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_column_instance_depends_on_column_instance", graphEdge.getRole())
-                        ),
-                        buildLatestFlowEdge(
-                                "latest_column_instance_flows_to_column_instance",
-                                graphEdge.getSourceNodeId(),
-                                graphEdge.getTargetNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_column_instance_flows_to_column_instance", graphEdge.getRole())
-                        )
-                );
-            case "EXPRESSION_TO_EXPRESSION":
-                return mergeStatements(
-                        buildDependencyEdges(
-                                "expression_depends_on_expression",
-                                "latest_expression_depends_on_expression",
-                                graphEdge.getTargetNodeId(),
-                                graphEdge.getSourceNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_expression_depends_on_expression", graphEdge.getRole())
-                        ),
-                        buildLatestFlowEdge(
-                                "latest_expression_flows_to_expression",
-                                graphEdge.getSourceNodeId(),
-                                graphEdge.getTargetNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_expression_flows_to_expression", graphEdge.getRole())
-                        )
+                return buildLatestFlowEdge(
+                        "latest_column_instance_flows_to_column_instance",
+                        graphEdge.getSourceNodeId(),
+                        graphEdge.getTargetNodeId(),
+                        eventId,
+                        taskId,
+                        runId,
+                        captureTime,
+                        role,
+                        latestSemanticRank("latest_column_instance_flows_to_column_instance", graphEdge.getRole())
                 );
             case "LITERAL_TO_EXPRESSION":
-                return mergeStatements(
-                        buildDependencyEdges(
-                                "expression_depends_on_literal",
-                                "latest_expression_depends_on_literal",
-                                graphEdge.getTargetNodeId(),
-                                graphEdge.getSourceNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_expression_depends_on_literal", graphEdge.getRole())
-                        ),
-                        buildLatestFlowEdge(
-                                "latest_literal_flows_to_expression",
-                                graphEdge.getSourceNodeId(),
-                                graphEdge.getTargetNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_literal_flows_to_expression", graphEdge.getRole())
-                        )
+                return buildLatestFlowEdge(
+                        "latest_literal_flows_to_expression",
+                        graphEdge.getSourceNodeId(),
+                        graphEdge.getTargetNodeId(),
+                        eventId,
+                        taskId,
+                        runId,
+                        captureTime,
+                        role,
+                        latestSemanticRank("latest_literal_flows_to_expression", graphEdge.getRole())
                 );
             case "LITERAL_TO_PREDICATE":
-                return mergeStatements(
-                        buildDependencyEdges(
-                                "predicate_depends_on_literal",
-                                "latest_predicate_depends_on_literal",
-                                graphEdge.getTargetNodeId(),
-                                graphEdge.getSourceNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_predicate_depends_on_literal", graphEdge.getRole())
-                        ),
-                        buildLatestFlowEdge(
-                                "latest_literal_flows_to_predicate",
-                                graphEdge.getSourceNodeId(),
-                                graphEdge.getTargetNodeId(),
-                                eventId,
-                                taskId,
-                                runId,
-                                captureTime,
-                                role,
-                                latestSemanticRank("latest_literal_flows_to_predicate", graphEdge.getRole())
-                        )
+                return buildLatestFlowEdge(
+                        "latest_literal_flows_to_predicate",
+                        graphEdge.getSourceNodeId(),
+                        graphEdge.getTargetNodeId(),
+                        eventId,
+                        taskId,
+                        runId,
+                        captureTime,
+                        role,
+                        latestSemanticRank("latest_literal_flows_to_predicate", graphEdge.getRole())
                 );
             default:
-                LOGGER.debug("Skip unsupported lineage graph edge type: {}", graphEdge.getEdgeType());
+                LOGGER.debug("Skip converged-out lineage graph edge type: {}", graphEdge.getEdgeType());
                 return new ArrayList<>();
         }
     }
@@ -1472,44 +911,6 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 dstVid,
                 edgeRank(edgeName, srcVid, dstVid, role),
                 nullableQuote(eventId),
-                quoteLong(captureTimeSeconds),
-                role
-        ));
-        return statements;
-    }
-
-    private static List<String> buildDependencyEdges(
-            String factEdgeName,
-            String latestEdgeName,
-            String srcVid,
-            String dstVid,
-            String eventId,
-            String taskId,
-            String runId,
-            long captureTimeSeconds,
-            String role,
-            long latestRank
-    ) {
-        List<String> statements = new ArrayList<>();
-        statements.add(insertEdge(
-                factEdgeName,
-                srcVid,
-                dstVid,
-                edgeRank(eventId, factEdgeName, srcVid, dstVid, role),
-                quote(eventId),
-                nullableQuote(taskId),
-                nullableQuote(runId),
-                quoteLong(captureTimeSeconds),
-                role
-        ));
-        statements.addAll(replaceLatestEdge(
-                latestEdgeName,
-                srcVid,
-                dstVid,
-                latestRank,
-                nullableQuote(eventId),
-                nullableQuote(taskId),
-                nullableQuote(runId),
                 quoteLong(captureTimeSeconds),
                 role
         ));
@@ -1541,7 +942,6 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
     }
 
     private static List<String> buildLatestSemanticEdge(
-            String factEdgeName,
             String latestEdgeName,
             String srcVid,
             String dstVid,
@@ -1552,19 +952,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
             String role,
             long latestRank
     ) {
-        List<String> statements = new ArrayList<>();
-        statements.add(insertEdge(
-                factEdgeName,
-                srcVid,
-                dstVid,
-                edgeRank(eventId, factEdgeName, srcVid, dstVid, role),
-                quote(eventId),
-                nullableQuote(taskId),
-                nullableQuote(runId),
-                quoteLong(captureTimeSeconds),
-                role
-        ));
-        statements.addAll(replaceLatestEdge(
+        return replaceLatestEdge(
                 latestEdgeName,
                 srcVid,
                 dstVid,
@@ -1574,16 +962,7 @@ public final class NebulaLineageStorage implements LineageStorage, AutoCloseable
                 nullableQuote(runId),
                 quoteLong(captureTimeSeconds),
                 role
-        ));
-        return statements;
-    }
-
-    private static List<String> mergeStatements(List<String>... statementGroups) {
-        List<String> merged = new ArrayList<>();
-        for (List<String> statements : statementGroups) {
-            merged.addAll(statements);
-        }
-        return merged;
+        );
     }
 
     private static List<String> replaceLatestEdge(String edgeName, String srcVid, String dstVid, String... values) {

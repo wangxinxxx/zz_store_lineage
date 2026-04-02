@@ -83,9 +83,11 @@ public final class NebulaImporterBundleWriter {
             {"latest_relation_instance_joins_relation_instance", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
             {"latest_literal_flows_to_expression", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
             {"latest_column_instance_flows_to_expression", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
+            {"latest_expression_flows_to_expression", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
             {"latest_expression_flows_to_column_instance", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
             {"latest_column_instance_flows_to_column_instance", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
             {"latest_column_instance_flows_to_predicate", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
+            {"latest_relation_instance_flows_to_predicate", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
             {"latest_relation_instance_flows_to_column_instance", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
             {"latest_predicate_flows_to_column_instance", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"},
             {"latest_literal_flows_to_predicate", "last_event_id:string", "last_task_id:string", "last_run_id:string", "last_seen_time:timestamp", "role:string"}
@@ -564,6 +566,10 @@ public final class NebulaImporterBundleWriter {
                 putLatestFlowEdge("latest_column_instance_flows_to_predicate", graphEdge, eventId, taskId, runId, captureTime, role);
                 return;
             }
+            if ("RELATION_INSTANCE_TO_PREDICATE".equals(edgeType)) {
+                putLatestFlowEdge("latest_relation_instance_flows_to_predicate", graphEdge, eventId, taskId, runId, captureTime, role);
+                return;
+            }
             if ("RELATION_INSTANCE_TO_DERIVED_COLUMN_INSTANCE".equals(edgeType)) {
                 putLatestFlowEdge("latest_relation_instance_flows_to_column_instance", graphEdge, eventId, taskId, runId, captureTime, role);
                 return;
@@ -578,6 +584,10 @@ public final class NebulaImporterBundleWriter {
             }
             if ("COLUMN_INSTANCE_TO_EXPRESSION".equals(edgeType)) {
                 putLatestFlowEdge("latest_column_instance_flows_to_expression", graphEdge, eventId, taskId, runId, captureTime, role);
+                return;
+            }
+            if ("EXPRESSION_TO_EXPRESSION".equals(edgeType)) {
+                putLatestFlowEdge("latest_expression_flows_to_expression", graphEdge, eventId, taskId, runId, captureTime, role);
                 return;
             }
             if ("COLUMN_INSTANCE_TO_COLUMN_INSTANCE".equals(edgeType)) {

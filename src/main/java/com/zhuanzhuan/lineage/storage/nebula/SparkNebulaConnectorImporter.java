@@ -27,6 +27,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -340,10 +341,10 @@ public final class SparkNebulaConnectorImporter {
     }
 
     private static List<String> loadSchemaStatements(Path bundleDir, String space) throws IOException {
+        LinkedHashSet<String> statements = new LinkedHashSet<String>();
         if (bundleDir != null) {
             Path schemaPath = bundleDir.toAbsolutePath().normalize().resolve(NebulaImporterBundleWriter.SCHEMA_FILE_NAME);
             if (Files.isRegularFile(schemaPath)) {
-                List<String> statements = new ArrayList<String>();
                 for (String line : Files.readAllLines(schemaPath, StandardCharsets.UTF_8)) {
                     String statement = line == null ? "" : line.trim();
                     if (statement.isEmpty() || statement.startsWith("#") || statement.startsWith("--")) {
@@ -351,12 +352,10 @@ public final class SparkNebulaConnectorImporter {
                     }
                     statements.add(statement);
                 }
-                if (!statements.isEmpty()) {
-                    return statements;
-                }
             }
         }
-        return NebulaImporterBundleWriter.schemaStatements(space);
+        statements.addAll(NebulaImporterBundleWriter.schemaStatements(space));
+        return new ArrayList<String>(statements);
     }
 
     private static void executeBootstrapStatements(

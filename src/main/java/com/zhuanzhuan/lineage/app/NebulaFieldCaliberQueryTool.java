@@ -63,20 +63,24 @@ public final class NebulaFieldCaliberQueryTool {
                 throw new IllegalArgumentException("Column not found under table " + tableName + ": " + columnName);
             }
 
-            printTarget(tableInfo, targetColumn);
+            String anchorEventId = resolveAnchorEventId(session, targetColumn.vid);
 
-            List<ExpressionInfo> expressions = fetchExpressionsForColumn(session, targetColumn.vid);
-            List<ColumnInfo> upstreamColumns = fetchUpstreamColumnsForColumn(session, targetColumn.vid);
-            List<PredicateInfo> predicates = fetchPredicatesForColumn(session, targetColumn.vid);
+            List<ExpressionInfo> expressions = fetchExpressionsForColumn(session, targetColumn.vid, anchorEventId);
+            List<ColumnInfo> upstreamColumns = fetchUpstreamColumnsForColumn(session, targetColumn.vid, anchorEventId);
+            List<PredicateInfo> predicates = fetchPredicatesForColumn(session, targetColumn.vid, anchorEventId);
 
             if ("json".equals(outputFormat)) {
                 System.out.println(toJson(tableInfo, targetColumn, expressions, upstreamColumns, predicates));
             } else {
                 printTarget(tableInfo, targetColumn);
-                printExpressions(session, expressions);
+                if (!isBlank(anchorEventId)) {
+                    System.out.println("Anchor Event: " + anchorEventId);
+                    System.out.println();
+                }
+                printExpressions(session, expressions, anchorEventId);
                 printUpstreamColumns(upstreamColumns);
                 printPredicates(predicates);
-                printLineageTree(session, targetColumn);
+                printLineageTree(session, targetColumn, anchorEventId);
             }
         } finally {
             if (session != null) {
@@ -98,7 +102,7 @@ public final class NebulaFieldCaliberQueryTool {
         System.out.println();
     }
 
-    private static void printExpressions(Session session, List<ExpressionInfo> expressions) throws Exception {
+    private static void printExpressions(Session session, List<ExpressionInfo> expressions, String anchorEventId) throws Exception {
         System.out.println("Expressions");
         if (expressions.isEmpty()) {
             System.out.println("(none)");
@@ -108,15 +112,23 @@ public final class NebulaFieldCaliberQueryTool {
 
         for (int i = 0; i < expressions.size(); i++) {
             ExpressionInfo expression = expressions.get(i);
+            String expressionSql = firstNonEmpty(expression.displaySql, expression.expressionSql, expression.normalizedExpression);
             System.out.println((i + 1) + ". Type       : " + expression.expressionType);
-            System.out.println("   SQL        : " + expression.expressionSql);
+            if (!isBlank(expression.expressionCategory)) {
+                System.out.println("   Category   : " + expression.expressionCategory);
+            }
+            System.out.println("   SQL        : " + expressionSql);
             System.out.println("   Normalized : " + expression.normalizedExpression);
+            if (!isBlank(expression.queryBlockId) || !isBlank(expression.planNodeId)) {
+                System.out.println("   Context    : queryBlock=" + firstNonEmpty(expression.queryBlockId, "-")
+                        + ", planNode=" + firstNonEmpty(expression.planNodeId, "-"));
+            }
 
-            List<ColumnInfo> sourceColumns = fetchColumnsForExpression(session, expression.vid);
-            List<ColumnInstanceResolution> columnInstanceResolutions = fetchColumnInstanceResolutionsForExpression(session, expression.vid);
-            List<LiteralInfo> literals = fetchLiteralsForExpression(session, expression.vid);
-            List<RelationJoinInfo> joins = fetchJoinRelationsForExpression(session, expression.vid);
-            List<PredicateUsageInfo> filters = fetchFilterPredicatesForExpression(session, expression.vid);
+            List<ColumnInfo> sourceColumns = fetchColumnsForExpression(session, expression.vid, anchorEventId);
+            List<ColumnInstanceResolution> columnInstanceResolutions = fetchColumnInstanceResolutionsForExpression(session, expression.vid, anchorEventId);
+            List<LiteralInfo> literals = fetchLiteralsForExpression(session, expression.vid, anchorEventId);
+            List<RelationJoinInfo> joins = fetchJoinRelationsForExpression(session, expression.vid, anchorEventId);
+            List<PredicateUsageInfo> filters = fetchFilterPredicatesForExpression(session, expression.vid, anchorEventId);
 
             System.out.println("   Source Cols: " + joinColumnRefs(sourceColumns));
             System.out.println("   Source Inst: " + joinColumnInstanceResolutions(columnInstanceResolutions));
@@ -151,40 +163,197 @@ public final class NebulaFieldCaliberQueryTool {
 
         for (int i = 0; i < predicates.size(); i++) {
             PredicateInfo predicate = predicates.get(i);
+            String predicateSql = firstNonEmpty(predicate.displaySql, predicate.predicateSql, predicate.normalizedPredicate);
             System.out.println((i + 1) + ". Type       : " + predicate.predicateType);
-            System.out.println("   SQL        : " + predicate.predicateSql);
+            if (!isBlank(predicate.predicateRole)) {
+                System.out.println("   Role       : " + predicate.predicateRole);
+            }
+            System.out.println("   SQL        : " + predicateSql);
             System.out.println("   Normalized : " + predicate.normalizedPredicate);
             System.out.println("   Scope      : " + predicate.scopeId);
+            if (!isBlank(predicate.queryBlockId) || !isBlank(predicate.planNodeId)) {
+                System.out.println("   Context    : queryBlock=" + firstNonEmpty(predicate.queryBlockId, "-")
+                        + ", planNode=" + firstNonEmpty(predicate.planNodeId, "-"));
+            }
         }
     }
 
-    private static void printLineageTree(Session session, ColumnInfo targetColumn) throws Exception {
-        System.out.println();
-        System.out.println("Lineage tree");
-        printColumnTree(session, targetColumn, 0, new HashSet<String>(), new HashSet<String>());
+    private static String resolveAnchorEventId(Session session, String columnVid) throws Exception {
+        EventCandidate best = null;
+
+        best = selectBetterEventCandidate(best, collectLatestEventCandidate(
+                session,
+                "GO FROM " + quote(columnVid) + " OVER `latest_expression_flows_to_column` REVERSELY "
+                        + "YIELD properties(edge).last_event_id AS event_id, properties(edge).last_seen_time AS last_seen_time;"
+        ));
+        best = selectBetterEventCandidate(best, collectLatestEventCandidate(
+                session,
+                "GO FROM " + quote(columnVid) + " OVER `latest_column_flows_to_column` REVERSELY "
+                        + "YIELD properties(edge).last_event_id AS event_id, properties(edge).last_seen_time AS last_seen_time;"
+        ));
+
+        for (ColumnInstanceInfo outputInstance : fetchOutputColumnInstancesForColumn(session, columnVid, "")) {
+            best = selectBetterEventCandidate(best, collectLatestEventCandidate(
+                    session,
+                    "GO FROM " + quote(outputInstance.vid) + " OVER `latest_expression_flows_to_column_instance` REVERSELY "
+                            + "YIELD properties(edge).last_event_id AS event_id, properties(edge).last_seen_time AS last_seen_time;"
+            ));
+            best = selectBetterEventCandidate(best, collectLatestEventCandidate(
+                    session,
+                    "GO FROM " + quote(outputInstance.vid) + " OVER `latest_column_instance_flows_to_column_instance` REVERSELY "
+                            + "YIELD properties(edge).last_event_id AS event_id, properties(edge).last_seen_time AS last_seen_time;"
+            ));
+            best = selectBetterEventCandidate(best, collectLatestEventCandidate(
+                    session,
+                    "GO FROM " + quote(outputInstance.vid) + " OVER `latest_predicate_flows_to_column_instance` REVERSELY "
+                            + "YIELD properties(edge).last_event_id AS event_id, properties(edge).last_seen_time AS last_seen_time;"
+            ));
+        }
+
+        return best == null ? "" : best.eventId;
     }
 
-    private static void printColumnTree(
+    private static EventCandidate collectLatestEventCandidate(Session session, String gql) throws Exception {
+        ResultSet resultSet = tryExecuteAllowMissingEdge(session, gql);
+        if (resultSet == null || resultSet.isEmpty()) {
+            return null;
+        }
+        EventCandidate best = null;
+        for (int i = 0; i < resultSet.rowsSize(); i++) {
+            ResultSet.Record record = resultSet.rowValues(i);
+            String eventId = value(record, "event_id");
+            if (isBlank(eventId)) {
+                continue;
+            }
+            long lastSeenTime = parseTimeToLong(value(record, "last_seen_time"));
+            EventCandidate candidate = new EventCandidate(eventId, lastSeenTime);
+            best = selectBetterEventCandidate(best, candidate);
+        }
+        return best;
+    }
+
+    private static EventCandidate selectBetterEventCandidate(EventCandidate current, EventCandidate incoming) {
+        if (incoming == null || isBlank(incoming.eventId)) {
+            return current;
+        }
+        if (current == null || isBlank(current.eventId)) {
+            return incoming;
+        }
+        if (incoming.lastSeenTime > current.lastSeenTime) {
+            return incoming;
+        }
+        if (incoming.lastSeenTime < current.lastSeenTime) {
+            return current;
+        }
+        return incoming.eventId.compareTo(current.eventId) >= 0 ? incoming : current;
+    }
+
+    private static void printLineageTree(Session session, ColumnInfo targetColumn, String anchorEventId) throws Exception {
+        System.out.println();
+        System.out.println("Lineage tree");
+        List<ColumnInstanceInfo> roots = fetchOutputColumnInstancesForColumn(session, targetColumn.vid, anchorEventId);
+        if (roots.isEmpty()) {
+            System.out.println("(none)");
+            return;
+        }
+        for (int i = 0; i < roots.size(); i++) {
+            ColumnInstanceInfo root = roots.get(i);
+            if (roots.size() > 1) {
+                System.out.println("ROOT " + (i + 1) + "/" + roots.size());
+            }
+            printColumnInstanceTree(
+                    session,
+                    root,
+                    0,
+                    anchorEventId,
+                    new HashSet<String>(),
+                    new HashSet<String>(),
+                    new HashSet<String>()
+            );
+            if (i < roots.size() - 1) {
+                System.out.println();
+            }
+        }
+    }
+
+    private static void printColumnInstanceTree(
             Session session,
-            ColumnInfo column,
+            ColumnInstanceInfo columnInstance,
             int depth,
-            Set<String> visitedColumns,
-            Set<String> visitedExpressions
+            String anchorEventId,
+            Set<String> visitedColumnInstances,
+            Set<String> visitedExpressions,
+            Set<String> visitedPredicates
     ) throws Exception {
         String prefix = indent(depth);
-        System.out.println(prefix + "COLUMN " + formatColumnRef(column));
-        if (!visitedColumns.add(column.vid)) {
+        String instanceRef = formatColumnInstanceRef(session, columnInstance);
+        System.out.println(prefix + "COL_INST " + instanceRef + " | type=" + firstNonEmpty(columnInstance.instanceType, "unknown"));
+        if (!visitedColumnInstances.add(columnInstance.vid)) {
             return;
         }
 
-        List<ExpressionInfo> expressions = fetchExpressionsForColumn(session, column.vid);
-        for (ExpressionInfo expression : expressions) {
-            printExpressionTree(session, expression, depth + 1, visitedColumns, visitedExpressions);
+        List<RelationInstanceInfo> relations = fetchDirectRelationInstancesForDerivedColumnInstance(session, columnInstance.vid, anchorEventId);
+        for (RelationInstanceInfo relation : relations) {
+            String relationRef = formatRelationInstanceRef(session, relation);
+            if (!isBlank(relationRef)) {
+                System.out.println(indent(depth + 1) + "RELATION " + relationRef);
+            }
         }
 
-        List<ColumnInfo> upstreamColumns = fetchUpstreamColumnsForColumn(session, column.vid);
-        for (ColumnInfo upstreamColumn : upstreamColumns) {
-            printColumnTree(session, upstreamColumn, depth + 1, visitedColumns, visitedExpressions);
+        Set<String> expressionVids = collectUniqueVidsByEvent(
+                session,
+                "expression_vid",
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(columnInstance.vid)
+                        + " OVER `latest_expression_flows_to_column_instance` REVERSELY "
+                        + "YIELD src(edge) AS expression_vid, properties(edge).last_event_id AS event_id;"
+        );
+        List<ExpressionInfo> expressions = fetchExpressionsByVids(session, expressionVids);
+        for (ExpressionInfo expression : expressions) {
+            printExpressionTree(
+                    session,
+                    expression,
+                    depth + 1,
+                    anchorEventId,
+                    visitedColumnInstances,
+                    visitedExpressions,
+                    visitedPredicates
+            );
+        }
+
+        List<ColumnInstanceInfo> upstreamColumnInstances = fetchUpstreamColumnInstancesForColumnInstance(session, columnInstance.vid, anchorEventId);
+        for (ColumnInstanceInfo upstreamColumnInstance : upstreamColumnInstances) {
+            printColumnInstanceTree(
+                    session,
+                    upstreamColumnInstance,
+                    depth + 1,
+                    anchorEventId,
+                    visitedColumnInstances,
+                    visitedExpressions,
+                    visitedPredicates
+            );
+        }
+
+        List<VidRoleRef> predicateRefs = collectVidRolesByEvent(
+                session,
+                "predicate_vid",
+                "role",
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(columnInstance.vid)
+                        + " OVER `latest_predicate_flows_to_column_instance` REVERSELY "
+                        + "YIELD src(edge) AS predicate_vid, properties(edge).role AS role, properties(edge).last_event_id AS event_id;"
+        );
+        for (VidRoleRef predicateRef : predicateRefs) {
+            printPredicateTree(
+                    session,
+                    predicateRef,
+                    depth + 1,
+                    anchorEventId,
+                    visitedColumnInstances,
+                    visitedPredicates
+            );
         }
     }
 
@@ -192,37 +361,47 @@ public final class NebulaFieldCaliberQueryTool {
             Session session,
             ExpressionInfo expression,
             int depth,
-            Set<String> visitedColumns,
-            Set<String> visitedExpressions
+            String anchorEventId,
+            Set<String> visitedColumnInstances,
+            Set<String> visitedExpressions,
+            Set<String> visitedPredicates
     ) throws Exception {
         String prefix = indent(depth);
-        System.out.println(prefix + "EXPR   " + expression.expressionSql);
+        System.out.println(prefix + "EXPR   " + firstNonEmpty(expression.displaySql, expression.expressionSql, expression.normalizedExpression, expression.vid));
         if (!visitedExpressions.add(expression.vid)) {
             return;
         }
 
-        List<LiteralInfo> literals = fetchLiteralsForExpression(session, expression.vid);
+        List<LiteralInfo> literals = fetchLiteralsForExpression(session, expression.vid, anchorEventId);
         for (LiteralInfo literal : literals) {
             System.out.println(indent(depth + 1) + "LITERAL " + literalDisplay(literal));
         }
 
-        List<ExpressionInfo> nestedExpressions = fetchExpressionsForExpression(session, expression.vid);
+        List<ExpressionInfo> nestedExpressions = fetchExpressionsForExpression(session, expression.vid, anchorEventId);
         for (ExpressionInfo nestedExpression : nestedExpressions) {
-            printExpressionTree(session, nestedExpression, depth + 1, visitedColumns, visitedExpressions);
+            printExpressionTree(
+                    session,
+                    nestedExpression,
+                    depth + 1,
+                    anchorEventId,
+                    visitedColumnInstances,
+                    visitedExpressions,
+                    visitedPredicates
+            );
         }
 
-        List<ColumnInstanceResolution> columnInstanceResolutions = fetchColumnInstanceResolutionsForExpression(session, expression.vid);
+        List<ColumnInstanceResolution> columnInstanceResolutions = fetchColumnInstanceResolutionsForExpression(session, expression.vid, anchorEventId);
         for (ColumnInstanceResolution resolution : columnInstanceResolutions) {
             System.out.println(indent(depth + 1) + "COL_INST " + resolution.instanceRef + " -> " + resolution.resolvedRef);
         }
 
-        List<RelationJoinInfo> joins = fetchJoinRelationsForExpression(session, expression.vid);
+        List<RelationJoinInfo> joins = fetchJoinRelationsForExpression(session, expression.vid, anchorEventId);
         for (RelationJoinInfo join : joins) {
             String roleSuffix = isBlank(join.role) ? "" : " | role=" + join.role;
             System.out.println(indent(depth + 1) + "JOIN   " + join.leftRef + " <-> " + join.rightRef + roleSuffix);
         }
 
-        List<PredicateUsageInfo> filters = fetchFilterPredicatesForExpression(session, expression.vid);
+        List<PredicateUsageInfo> filters = fetchFilterPredicatesForExpression(session, expression.vid, anchorEventId);
         for (PredicateUsageInfo usage : filters) {
             String sql = firstNonEmpty(usage.predicate.predicateSql, usage.predicate.normalizedPredicate, usage.predicate.vid);
             String sourceRef = isBlank(usage.sourceRef) ? "unknown" : usage.sourceRef;
@@ -230,9 +409,82 @@ public final class NebulaFieldCaliberQueryTool {
             System.out.println(indent(depth + 1) + "FILTER " + sql + " | source=" + sourceRef + roleSuffix);
         }
 
-        List<ColumnInfo> sourceColumns = fetchColumnsForExpression(session, expression.vid);
-        for (ColumnInfo sourceColumn : sourceColumns) {
-            printColumnTree(session, sourceColumn, depth + 1, visitedColumns, visitedExpressions);
+        List<ColumnInstanceInfo> sourceColumnInstances = fetchColumnInstancesForExpression(session, expression.vid, anchorEventId);
+        for (ColumnInstanceInfo sourceColumnInstance : sourceColumnInstances) {
+            printColumnInstanceTree(
+                    session,
+                    sourceColumnInstance,
+                    depth + 1,
+                    anchorEventId,
+                    visitedColumnInstances,
+                    visitedExpressions,
+                    visitedPredicates
+            );
+        }
+    }
+
+    private static void printPredicateTree(
+            Session session,
+            VidRoleRef predicateRef,
+            int depth,
+            String anchorEventId,
+            Set<String> visitedColumnInstances,
+            Set<String> visitedPredicates
+    ) throws Exception {
+        PredicateInfo predicate = fetchPredicateInfo(session, predicateRef.vid);
+        if (predicate == null) {
+            return;
+        }
+        String sql = firstNonEmpty(predicate.displaySql, predicate.predicateSql, predicate.normalizedPredicate, predicate.vid);
+        String effectiveRole = firstNonEmpty(predicateRef.role, predicate.predicateRole);
+        String roleSuffix = isBlank(effectiveRole) ? "" : " | role=" + effectiveRole;
+        System.out.println(indent(depth) + "PREDICATE " + sql + roleSuffix);
+        if (!visitedPredicates.add(predicate.vid)) {
+            return;
+        }
+
+        for (VidRoleRef relationRef : fetchRelationsForPredicate(session, predicate.vid, anchorEventId)) {
+            RelationInstanceInfo relation = fetchRelationInstanceInfo(session, relationRef.vid);
+            if (relation == null) {
+                continue;
+            }
+            String relationDisplay = formatRelationInstanceRef(session, relation);
+            String relationRoleSuffix = isBlank(relationRef.role) ? "" : " | role=" + relationRef.role;
+            System.out.println(indent(depth + 1) + "RELATION " + relationDisplay + relationRoleSuffix);
+        }
+
+        Set<String> sourceColumnInstanceVids = collectUniqueVidsByEvent(
+                session,
+                "column_instance_vid",
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(predicate.vid)
+                        + " OVER `latest_column_instance_flows_to_predicate` REVERSELY "
+                        + "YIELD src(edge) AS column_instance_vid, properties(edge).last_event_id AS event_id;"
+        );
+        for (ColumnInstanceInfo source : fetchColumnInstancesByVids(session, sourceColumnInstanceVids)) {
+            printColumnInstanceTree(
+                    session,
+                    source,
+                    depth + 1,
+                    anchorEventId,
+                    visitedColumnInstances,
+                    new HashSet<String>(),
+                    visitedPredicates
+            );
+        }
+
+        Set<String> literalVids = collectUniqueVidsByEvent(
+                session,
+                "literal_vid",
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(predicate.vid)
+                        + " OVER `latest_literal_flows_to_predicate` REVERSELY "
+                        + "YIELD src(edge) AS literal_vid, properties(edge).last_event_id AS event_id;"
+        );
+        for (LiteralInfo literal : fetchLiteralsByVids(session, literalVids)) {
+            System.out.println(indent(depth + 1) + "LITERAL " + literalDisplay(literal));
         }
     }
 
@@ -268,54 +520,118 @@ public final class NebulaFieldCaliberQueryTool {
     }
 
     private static List<ExpressionInfo> fetchExpressionsForColumn(Session session, String columnVid) throws Exception {
-        Set<String> vids = collectUniqueVids(
-                session,
-                "expression_vid",
-                "GO FROM " + quote(columnVid) + " OVER `latest_column_uses_expression` YIELD dst(edge) AS expression_vid;",
-                "GO FROM " + quote(columnVid) + " OVER `column_uses_expression` YIELD dst(edge) AS expression_vid;"
-        );
+        return fetchExpressionsForColumn(session, columnVid, "");
+    }
+
+    private static List<ExpressionInfo> fetchExpressionsForColumn(Session session, String columnVid, String anchorEventId) throws Exception {
+        FlowTraversalContext flow = collectFlowContextForColumn(session, columnVid, anchorEventId);
+        Set<String> vids = new LinkedHashSet<String>(flow.expressionVids);
+        if (vids.isEmpty()) {
+            vids.addAll(collectUniqueVidsByEvent(
+                    session,
+                    "expression_vid",
+                    "event_id",
+                    anchorEventId,
+                    "GO FROM " + quote(columnVid) + " OVER `latest_expression_flows_to_column` REVERSELY "
+                            + "YIELD src(edge) AS expression_vid, properties(edge).last_event_id AS event_id;"
+            ));
+        }
         return fetchExpressionsByVids(session, vids);
     }
 
     private static List<ColumnInfo> fetchUpstreamColumnsForColumn(Session session, String columnVid) throws Exception {
-        Set<String> vids = collectUniqueVids(
-                session,
-                "column_vid",
-                "GO FROM " + quote(columnVid) + " OVER `latest_column_depends_on_column` YIELD dst(edge) AS column_vid;",
-                "GO FROM " + quote(columnVid) + " OVER `column_depends_on_column` YIELD dst(edge) AS column_vid;"
-        );
+        return fetchUpstreamColumnsForColumn(session, columnVid, "");
+    }
+
+    private static List<ColumnInfo> fetchUpstreamColumnsForColumn(Session session, String columnVid, String anchorEventId) throws Exception {
+        FlowTraversalContext flow = collectFlowContextForColumn(session, columnVid, anchorEventId);
+        Set<String> vids = new LinkedHashSet<String>(flow.upstreamColumnVids);
+        vids.remove(columnVid);
+        if (vids.isEmpty()) {
+            vids.addAll(collectUniqueVidsByEvent(
+                    session,
+                    "column_vid",
+                    "event_id",
+                    anchorEventId,
+                    "GO FROM " + quote(columnVid) + " OVER `latest_column_flows_to_column` REVERSELY "
+                            + "YIELD src(edge) AS column_vid, properties(edge).last_event_id AS event_id;"
+            ));
+        }
         return fetchColumnsByVids(session, vids);
     }
 
     private static List<PredicateInfo> fetchPredicatesForColumn(Session session, String columnVid) throws Exception {
-        Set<String> vids = collectUniqueVids(
-                session,
-                "predicate_vid",
-                "GO FROM " + quote(columnVid) + " OVER `latest_column_flows_to_predicate` YIELD dst(edge) AS predicate_vid;",
-                "GO FROM " + quote(columnVid) + " OVER `latest_predicate_depends_on_column` REVERSELY YIELD src(edge) AS predicate_vid;",
-                "GO FROM " + quote(columnVid) + " OVER `predicate_depends_on_column` REVERSELY YIELD src(edge) AS predicate_vid;"
-        );
+        return fetchPredicatesForColumn(session, columnVid, "");
+    }
+
+    private static List<PredicateInfo> fetchPredicatesForColumn(Session session, String columnVid, String anchorEventId) throws Exception {
+        FlowTraversalContext flow = collectFlowContextForColumn(session, columnVid, anchorEventId);
+        Set<String> vids = new LinkedHashSet<String>(flow.predicateVids);
+        if (vids.isEmpty()) {
+            vids.addAll(collectUniqueVidsByEvent(
+                    session,
+                    "predicate_vid",
+                    "event_id",
+                    anchorEventId,
+                    "GO FROM " + quote(columnVid) + " OVER `latest_column_flows_to_predicate` "
+                            + "YIELD dst(edge) AS predicate_vid, properties(edge).last_event_id AS event_id;"
+            ));
+        }
         return fetchPredicatesByVids(session, vids);
     }
 
     private static List<ColumnInfo> fetchColumnsForExpression(Session session, String expressionVid) throws Exception {
-        Set<String> vids = collectUniqueVids(
+        return fetchColumnsForExpression(session, expressionVid, "");
+    }
+
+    private static List<ColumnInfo> fetchColumnsForExpression(Session session, String expressionVid, String anchorEventId) throws Exception {
+        List<ColumnInfo> columns = new ArrayList<ColumnInfo>();
+        Set<String> seenRefs = new LinkedHashSet<String>();
+
+        Set<String> columnInstanceVids = collectUniqueVidsByEvent(
+                session,
+                "column_instance_vid",
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(expressionVid) + " OVER `latest_column_instance_flows_to_expression` REVERSELY "
+                        + "YIELD src(edge) AS column_instance_vid, properties(edge).last_event_id AS event_id;"
+        );
+        for (ColumnInstanceInfo columnInstanceInfo : fetchColumnInstancesByVids(session, columnInstanceVids)) {
+            List<ColumnInfo> resolved = resolveColumnsForColumnInstance(session, columnInstanceInfo, new HashSet<String>(), anchorEventId);
+            for (ColumnInfo columnInfo : resolved) {
+                addColumnIfAbsent(columns, seenRefs, columnInfo);
+            }
+        }
+
+        Set<String> directColumnVids = collectUniqueVidsByEvent(
                 session,
                 "column_vid",
-                "GO FROM " + quote(expressionVid) + " OVER `latest_expression_depends_on_column` YIELD dst(edge) AS column_vid;",
-                "GO FROM " + quote(expressionVid) + " OVER `expression_depends_on_column` YIELD dst(edge) AS column_vid;",
-                "GO FROM " + quote(expressionVid) + " OVER `latest_column_flows_to_expression` REVERSELY YIELD src(edge) AS column_vid;"
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(expressionVid) + " OVER `latest_column_flows_to_expression` REVERSELY "
+                        + "YIELD src(edge) AS column_vid, properties(edge).last_event_id AS event_id;"
         );
-        return fetchColumnsByVids(session, vids);
+        for (ColumnInfo columnInfo : fetchColumnsByVids(session, directColumnVids)) {
+            addColumnIfAbsent(columns, seenRefs, columnInfo);
+        }
+        return columns;
     }
 
     private static List<ColumnInstanceResolution> fetchColumnInstanceResolutionsForExpression(Session session, String expressionVid) throws Exception {
-        List<ColumnInstanceInfo> columnInstances = fetchColumnInstancesForExpression(session, expressionVid);
+        return fetchColumnInstanceResolutionsForExpression(session, expressionVid, "");
+    }
+
+    private static List<ColumnInstanceResolution> fetchColumnInstanceResolutionsForExpression(
+            Session session,
+            String expressionVid,
+            String anchorEventId
+    ) throws Exception {
+        List<ColumnInstanceInfo> columnInstances = fetchColumnInstancesForExpression(session, expressionVid, anchorEventId);
         List<ColumnInstanceResolution> resolutions = new ArrayList<ColumnInstanceResolution>();
         Set<String> seen = new LinkedHashSet<String>();
         for (ColumnInstanceInfo columnInstance : columnInstances) {
             String instanceRef = formatColumnInstanceRef(session, columnInstance);
-            List<ColumnInfo> resolvedColumns = resolveColumnsForColumnInstance(session, columnInstance, new HashSet<String>());
+            List<ColumnInfo> resolvedColumns = resolveColumnsForColumnInstance(session, columnInstance, new HashSet<String>(), anchorEventId);
             if (resolvedColumns.isEmpty()) {
                 String key = instanceRef + "->(unresolved)";
                 if (seen.add(key)) {
@@ -335,42 +651,82 @@ public final class NebulaFieldCaliberQueryTool {
     }
 
     private static List<ColumnInstanceInfo> fetchColumnInstancesForExpression(Session session, String expressionVid) throws Exception {
-        Set<String> vids = collectUniqueVids(
+        return fetchColumnInstancesForExpression(session, expressionVid, "");
+    }
+
+    private static List<ColumnInstanceInfo> fetchColumnInstancesForExpression(
+            Session session,
+            String expressionVid,
+            String anchorEventId
+    ) throws Exception {
+        Set<String> vids = collectUniqueVidsByEvent(
                 session,
                 "column_instance_vid",
-                "GO FROM " + quote(expressionVid) + " OVER `latest_expression_depends_on_column_instance` YIELD dst(edge) AS column_instance_vid;",
-                "GO FROM " + quote(expressionVid) + " OVER `expression_depends_on_column_instance` YIELD dst(edge) AS column_instance_vid;",
-                "GO FROM " + quote(expressionVid) + " OVER `latest_column_instance_flows_to_expression` REVERSELY YIELD src(edge) AS column_instance_vid;"
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(expressionVid) + " OVER `latest_column_instance_flows_to_expression` REVERSELY "
+                        + "YIELD src(edge) AS column_instance_vid, properties(edge).last_event_id AS event_id;"
         );
         return fetchColumnInstancesByVids(session, vids);
     }
 
     private static List<ColumnInstanceInfo> fetchSinkColumnInstancesForExpression(Session session, String expressionVid) throws Exception {
-        Set<String> vids = collectUniqueVids(
+        return fetchSinkColumnInstancesForExpression(session, expressionVid, "");
+    }
+
+    private static List<ColumnInstanceInfo> fetchSinkColumnInstancesForExpression(
+            Session session,
+            String expressionVid,
+            String anchorEventId
+    ) throws Exception {
+        Set<String> vids = collectUniqueVidsByEvent(
                 session,
                 "column_instance_vid",
-                "GO FROM " + quote(expressionVid) + " OVER `latest_expression_flows_to_column_instance` YIELD dst(edge) AS column_instance_vid;",
-                "GO FROM " + quote(expressionVid) + " OVER `column_instance_uses_expression` REVERSELY YIELD src(edge) AS column_instance_vid;"
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(expressionVid) + " OVER `latest_expression_flows_to_column_instance` "
+                        + "YIELD dst(edge) AS column_instance_vid, properties(edge).last_event_id AS event_id;"
         );
         return fetchColumnInstancesByVids(session, vids);
     }
 
     private static List<RelationInstanceInfo> fetchDirectRelationInstancesForDerivedColumnInstance(Session session, String columnInstanceVid) throws Exception {
-        Set<String> vids = collectUniqueVids(
+        return fetchDirectRelationInstancesForDerivedColumnInstance(session, columnInstanceVid, "");
+    }
+
+    private static List<RelationInstanceInfo> fetchDirectRelationInstancesForDerivedColumnInstance(
+            Session session,
+            String columnInstanceVid,
+            String anchorEventId
+    ) throws Exception {
+        Set<String> vids = collectUniqueVidsByEvent(
                 session,
                 "relation_instance_vid",
-                "GO FROM " + quote(columnInstanceVid) + " OVER `latest_column_instance_depends_on_relation_instance` YIELD dst(edge) AS relation_instance_vid;",
-                "GO FROM " + quote(columnInstanceVid) + " OVER `column_instance_depends_on_relation_instance` YIELD dst(edge) AS relation_instance_vid;",
-                "GO FROM " + quote(columnInstanceVid) + " OVER `latest_relation_instance_flows_to_column_instance` REVERSELY YIELD src(edge) AS relation_instance_vid;"
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(columnInstanceVid) + " OVER `latest_relation_instance_flows_to_column_instance` REVERSELY "
+                        + "YIELD src(edge) AS relation_instance_vid, properties(edge).last_event_id AS event_id;"
         );
         return fetchRelationInstancesByVids(session, vids);
     }
 
     private static List<RelationInstanceInfo> fetchRelationInstancesForExpression(Session session, String expressionVid) throws Exception {
-        List<ColumnInstanceInfo> sinkColumnInstances = fetchSinkColumnInstancesForExpression(session, expressionVid);
+        return fetchRelationInstancesForExpression(session, expressionVid, "");
+    }
+
+    private static List<RelationInstanceInfo> fetchRelationInstancesForExpression(
+            Session session,
+            String expressionVid,
+            String anchorEventId
+    ) throws Exception {
+        List<ColumnInstanceInfo> sinkColumnInstances = fetchSinkColumnInstancesForExpression(session, expressionVid, anchorEventId);
         Set<String> relationVids = new LinkedHashSet<String>();
         for (ColumnInstanceInfo sinkColumnInstance : sinkColumnInstances) {
-            List<RelationInstanceInfo> directRelations = fetchDirectRelationInstancesForDerivedColumnInstance(session, sinkColumnInstance.vid);
+            List<RelationInstanceInfo> directRelations = fetchDirectRelationInstancesForDerivedColumnInstance(
+                    session,
+                    sinkColumnInstance.vid,
+                    anchorEventId
+            );
             for (RelationInstanceInfo relation : directRelations) {
                 relationVids.add(relation.vid);
             }
@@ -379,7 +735,15 @@ public final class NebulaFieldCaliberQueryTool {
     }
 
     private static List<RelationJoinInfo> fetchJoinRelationsForExpression(Session session, String expressionVid) throws Exception {
-        List<RelationInstanceInfo> relationInstances = fetchRelationInstancesForExpression(session, expressionVid);
+        return fetchJoinRelationsForExpression(session, expressionVid, "");
+    }
+
+    private static List<RelationJoinInfo> fetchJoinRelationsForExpression(
+            Session session,
+            String expressionVid,
+            String anchorEventId
+    ) throws Exception {
+        List<RelationInstanceInfo> relationInstances = fetchRelationInstancesForExpression(session, expressionVid, anchorEventId);
         List<RelationJoinInfo> joins = new ArrayList<RelationJoinInfo>();
         Set<String> seen = new LinkedHashSet<String>();
         Map<String, RelationInstanceInfo> relationCache = new HashMap<String, RelationInstanceInfo>();
@@ -387,14 +751,16 @@ public final class NebulaFieldCaliberQueryTool {
             relationCache.put(relationInstance.vid, relationInstance);
         }
         for (RelationInstanceInfo relationInstance : relationInstances) {
-            List<VidRoleRef> joinedRelations = collectVidRoles(
+            List<VidRoleRef> joinedRelations = collectVidRolesByEvent(
                     session,
                     "relation_instance_vid",
                     "role",
-                    "GO FROM " + quote(relationInstance.vid) + " OVER `latest_relation_instance_joins_relation_instance` YIELD dst(edge) AS relation_instance_vid, properties(edge).role AS role;",
-                    "GO FROM " + quote(relationInstance.vid) + " OVER `relation_instance_joins_relation_instance` YIELD dst(edge) AS relation_instance_vid, properties(edge).role AS role;",
-                    "GO FROM " + quote(relationInstance.vid) + " OVER `latest_relation_instance_joins_relation_instance` REVERSELY YIELD src(edge) AS relation_instance_vid, properties(edge).role AS role;",
-                    "GO FROM " + quote(relationInstance.vid) + " OVER `relation_instance_joins_relation_instance` REVERSELY YIELD src(edge) AS relation_instance_vid, properties(edge).role AS role;"
+                    "event_id",
+                    anchorEventId,
+                    "GO FROM " + quote(relationInstance.vid) + " OVER `latest_relation_instance_joins_relation_instance` "
+                            + "YIELD dst(edge) AS relation_instance_vid, properties(edge).role AS role, properties(edge).last_event_id AS event_id;",
+                    "GO FROM " + quote(relationInstance.vid) + " OVER `latest_relation_instance_joins_relation_instance` REVERSELY "
+                            + "YIELD src(edge) AS relation_instance_vid, properties(edge).role AS role, properties(edge).last_event_id AS event_id;"
             );
             for (VidRoleRef joinedRelation : joinedRelations) {
                 RelationInstanceInfo target = relationCache.get(joinedRelation.vid);
@@ -430,27 +796,68 @@ public final class NebulaFieldCaliberQueryTool {
     }
 
     private static List<PredicateUsageInfo> fetchFilterPredicatesForExpression(Session session, String expressionVid) throws Exception {
+        return fetchFilterPredicatesForExpression(session, expressionVid, "");
+    }
+
+    private static List<PredicateUsageInfo> fetchFilterPredicatesForExpression(
+            Session session,
+            String expressionVid,
+            String anchorEventId
+    ) throws Exception {
         List<PredicateUsageInfo> usages = new ArrayList<PredicateUsageInfo>();
         Set<String> seen = new LinkedHashSet<String>();
         Map<String, PredicateInfo> predicateCache = new HashMap<String, PredicateInfo>();
 
-        List<ColumnInstanceInfo> sinkColumnInstances = fetchSinkColumnInstancesForExpression(session, expressionVid);
+        List<ColumnInstanceInfo> sinkColumnInstances = fetchSinkColumnInstancesForExpression(session, expressionVid, anchorEventId);
         for (ColumnInstanceInfo sinkColumnInstance : sinkColumnInstances) {
             String sourceRef = formatColumnInstanceRef(session, sinkColumnInstance);
-            List<VidRoleRef> predicateRefs = collectVidRoles(
+            List<VidRoleRef> predicateRefs = collectVidRolesByEvent(
                     session,
                     "predicate_vid",
                     "role",
-                    "GO FROM " + quote(sinkColumnInstance.vid) + " OVER `latest_column_instance_filtered_by_predicate` YIELD dst(edge) AS predicate_vid, properties(edge).role AS role;",
-                    "GO FROM " + quote(sinkColumnInstance.vid) + " OVER `column_instance_filtered_by_predicate` YIELD dst(edge) AS predicate_vid, properties(edge).role AS role;",
-                    "GO FROM " + quote(sinkColumnInstance.vid) + " OVER `latest_predicate_flows_to_column_instance` REVERSELY YIELD src(edge) AS predicate_vid, properties(edge).role AS role;"
+                    "event_id",
+                    anchorEventId,
+                    "GO FROM " + quote(sinkColumnInstance.vid) + " OVER `latest_predicate_flows_to_column_instance` REVERSELY "
+                            + "YIELD src(edge) AS predicate_vid, properties(edge).role AS role, properties(edge).last_event_id AS event_id;"
             );
             for (VidRoleRef predicateRef : predicateRefs) {
                 addPredicateUsage(usages, seen, predicateCache, session, predicateRef.vid, sourceRef, predicateRef.role);
             }
         }
 
+        for (RelationInstanceInfo relationInstance : fetchRelationInstancesForExpression(session, expressionVid, anchorEventId)) {
+            String relationRef = formatRelationInstanceRef(session, relationInstance);
+            List<VidRoleRef> predicateRefs = collectVidRolesByEvent(
+                    session,
+                    "predicate_vid",
+                    "role",
+                    "event_id",
+                    anchorEventId,
+                    "GO FROM " + quote(relationInstance.vid) + " OVER `latest_relation_instance_flows_to_predicate` "
+                            + "YIELD dst(edge) AS predicate_vid, properties(edge).role AS role, properties(edge).last_event_id AS event_id;"
+            );
+            for (VidRoleRef predicateRef : predicateRefs) {
+                addPredicateUsage(usages, seen, predicateCache, session, predicateRef.vid, relationRef, predicateRef.role);
+            }
+        }
+
         return usages;
+    }
+
+    private static List<VidRoleRef> fetchRelationsForPredicate(
+            Session session,
+            String predicateVid,
+            String anchorEventId
+    ) throws Exception {
+        return collectVidRolesByEvent(
+                session,
+                "relation_instance_vid",
+                "role",
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(predicateVid) + " OVER `latest_relation_instance_flows_to_predicate` REVERSELY "
+                        + "YIELD src(edge) AS relation_instance_vid, properties(edge).role AS role, properties(edge).last_event_id AS event_id;"
+        );
     }
 
     private static void addPredicateUsage(
@@ -483,6 +890,15 @@ public final class NebulaFieldCaliberQueryTool {
             ColumnInstanceInfo columnInstance,
             Set<String> visitedColumnInstances
     ) throws Exception {
+        return resolveColumnsForColumnInstance(session, columnInstance, visitedColumnInstances, "");
+    }
+
+    private static List<ColumnInfo> resolveColumnsForColumnInstance(
+            Session session,
+            ColumnInstanceInfo columnInstance,
+            Set<String> visitedColumnInstances,
+            String anchorEventId
+    ) throws Exception {
         if (columnInstance == null || !visitedColumnInstances.add(columnInstance.vid)) {
             return new ArrayList<ColumnInfo>();
         }
@@ -497,9 +913,18 @@ public final class NebulaFieldCaliberQueryTool {
             }
         }
 
-        List<ColumnInstanceInfo> upstreamColumnInstances = fetchUpstreamColumnInstancesForColumnInstance(session, columnInstance.vid);
+        List<ColumnInstanceInfo> upstreamColumnInstances = fetchUpstreamColumnInstancesForColumnInstance(
+                session,
+                columnInstance.vid,
+                anchorEventId
+        );
         for (ColumnInstanceInfo upstreamColumnInstance : upstreamColumnInstances) {
-            List<ColumnInfo> upstreamColumns = resolveColumnsForColumnInstance(session, upstreamColumnInstance, visitedColumnInstances);
+            List<ColumnInfo> upstreamColumns = resolveColumnsForColumnInstance(
+                    session,
+                    upstreamColumnInstance,
+                    visitedColumnInstances,
+                    anchorEventId
+            );
             for (ColumnInfo upstreamColumn : upstreamColumns) {
                 addColumnIfAbsent(columns, seenRefs, upstreamColumn);
             }
@@ -509,7 +934,11 @@ public final class NebulaFieldCaliberQueryTool {
             return columns;
         }
 
-        List<RelationInstanceInfo> relationInstances = fetchUpstreamRelationInstancesForColumnInstance(session, columnInstance.vid);
+        List<RelationInstanceInfo> relationInstances = fetchUpstreamRelationInstancesForColumnInstance(
+                session,
+                columnInstance.vid,
+                anchorEventId
+        );
         if (relationInstances.isEmpty()) {
             RelationInstanceInfo primaryRelation = fetchPrimaryRelationForColumnInstance(session, columnInstance);
             if (primaryRelation != null) {
@@ -537,23 +966,41 @@ public final class NebulaFieldCaliberQueryTool {
     }
 
     private static List<ColumnInstanceInfo> fetchUpstreamColumnInstancesForColumnInstance(Session session, String columnInstanceVid) throws Exception {
-        Set<String> vids = collectUniqueVids(
+        return fetchUpstreamColumnInstancesForColumnInstance(session, columnInstanceVid, "");
+    }
+
+    private static List<ColumnInstanceInfo> fetchUpstreamColumnInstancesForColumnInstance(
+            Session session,
+            String columnInstanceVid,
+            String anchorEventId
+    ) throws Exception {
+        Set<String> vids = collectUniqueVidsByEvent(
                 session,
                 "column_instance_vid",
-                "GO FROM " + quote(columnInstanceVid) + " OVER `latest_column_instance_depends_on_column_instance` YIELD dst(edge) AS column_instance_vid;",
-                "GO FROM " + quote(columnInstanceVid) + " OVER `column_instance_depends_on_column_instance` YIELD dst(edge) AS column_instance_vid;",
-                "GO FROM " + quote(columnInstanceVid) + " OVER `latest_column_instance_flows_to_column_instance` REVERSELY YIELD src(edge) AS column_instance_vid;"
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(columnInstanceVid) + " OVER `latest_column_instance_flows_to_column_instance` REVERSELY "
+                        + "YIELD src(edge) AS column_instance_vid, properties(edge).last_event_id AS event_id;"
         );
         return fetchColumnInstancesByVids(session, vids);
     }
 
     private static List<RelationInstanceInfo> fetchUpstreamRelationInstancesForColumnInstance(Session session, String columnInstanceVid) throws Exception {
-        Set<String> vids = collectUniqueVids(
+        return fetchUpstreamRelationInstancesForColumnInstance(session, columnInstanceVid, "");
+    }
+
+    private static List<RelationInstanceInfo> fetchUpstreamRelationInstancesForColumnInstance(
+            Session session,
+            String columnInstanceVid,
+            String anchorEventId
+    ) throws Exception {
+        Set<String> vids = collectUniqueVidsByEvent(
                 session,
                 "relation_instance_vid",
-                "GO FROM " + quote(columnInstanceVid) + " OVER `latest_column_instance_depends_on_relation_instance` YIELD dst(edge) AS relation_instance_vid;",
-                "GO FROM " + quote(columnInstanceVid) + " OVER `column_instance_depends_on_relation_instance` YIELD dst(edge) AS relation_instance_vid;",
-                "GO FROM " + quote(columnInstanceVid) + " OVER `latest_relation_instance_flows_to_column_instance` REVERSELY YIELD src(edge) AS relation_instance_vid;"
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(columnInstanceVid) + " OVER `latest_relation_instance_flows_to_column_instance` REVERSELY "
+                        + "YIELD src(edge) AS relation_instance_vid, properties(edge).last_event_id AS event_id;"
         );
         return fetchRelationInstancesByVids(session, vids);
     }
@@ -595,7 +1042,12 @@ public final class NebulaFieldCaliberQueryTool {
                         + "`relation_instance_node`.`source_table_id` AS source_table_id,"
                         + "`relation_instance_node`.`source_type` AS source_type,"
                         + "`relation_instance_node`.`alias_name` AS alias_name,"
-                        + "`relation_instance_node`.`plan_node_name` AS plan_node_name;");
+                        + "`relation_instance_node`.`plan_node_name` AS plan_node_name,"
+                        + "`relation_instance_node`.`query_block_id` AS query_block_id,"
+                        + "`relation_instance_node`.`plan_node_id` AS plan_node_id,"
+                        + "`relation_instance_node`.`join_type` AS join_type,"
+                        + "`relation_instance_node`.`null_supply_side` AS null_supply_side,"
+                        + "`relation_instance_node`.`is_subquery_source` AS is_subquery_source;");
         if (resultSet.isEmpty()) {
             return null;
         }
@@ -607,7 +1059,12 @@ public final class NebulaFieldCaliberQueryTool {
                 value(record, "source_table_id"),
                 value(record, "source_type"),
                 value(record, "alias_name"),
-                value(record, "plan_node_name")
+                value(record, "plan_node_name"),
+                value(record, "query_block_id"),
+                value(record, "plan_node_id"),
+                value(record, "join_type"),
+                value(record, "null_supply_side"),
+                "true".equalsIgnoreCase(value(record, "is_subquery_source"))
         );
     }
 
@@ -728,25 +1185,261 @@ public final class NebulaFieldCaliberQueryTool {
     }
 
     private static List<ExpressionInfo> fetchExpressionsForExpression(Session session, String expressionVid) throws Exception {
-        Set<String> vids = collectUniqueVids(
+        return fetchExpressionsForExpression(session, expressionVid, "");
+    }
+
+    private static List<ExpressionInfo> fetchExpressionsForExpression(
+            Session session,
+            String expressionVid,
+            String anchorEventId
+    ) throws Exception {
+        Set<String> vids = collectUniqueVidsByEvent(
                 session,
                 "expression_vid",
-                "GO FROM " + quote(expressionVid) + " OVER `latest_expression_depends_on_expression` YIELD dst(edge) AS expression_vid;",
-                "GO FROM " + quote(expressionVid) + " OVER `expression_depends_on_expression` YIELD dst(edge) AS expression_vid;",
-                "GO FROM " + quote(expressionVid) + " OVER `latest_expression_flows_to_expression` REVERSELY YIELD src(edge) AS expression_vid;"
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(expressionVid) + " OVER `latest_expression_flows_to_expression` REVERSELY "
+                        + "YIELD src(edge) AS expression_vid, properties(edge).last_event_id AS event_id;"
         );
         return fetchExpressionsByVids(session, vids);
     }
 
     private static List<LiteralInfo> fetchLiteralsForExpression(Session session, String expressionVid) throws Exception {
-        Set<String> vids = collectUniqueVids(
+        return fetchLiteralsForExpression(session, expressionVid, "");
+    }
+
+    private static List<LiteralInfo> fetchLiteralsForExpression(
+            Session session,
+            String expressionVid,
+            String anchorEventId
+    ) throws Exception {
+        Set<String> vids = collectUniqueVidsByEvent(
                 session,
                 "literal_vid",
-                "GO FROM " + quote(expressionVid) + " OVER `latest_expression_depends_on_literal` YIELD dst(edge) AS literal_vid;",
-                "GO FROM " + quote(expressionVid) + " OVER `expression_depends_on_literal` YIELD dst(edge) AS literal_vid;",
-                "GO FROM " + quote(expressionVid) + " OVER `latest_literal_flows_to_expression` REVERSELY YIELD src(edge) AS literal_vid;"
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(expressionVid) + " OVER `latest_literal_flows_to_expression` REVERSELY "
+                        + "YIELD src(edge) AS literal_vid, properties(edge).last_event_id AS event_id;"
         );
         return fetchLiteralsByVids(session, vids);
+    }
+
+    private static List<ColumnInstanceInfo> fetchOutputColumnInstancesForColumn(Session session, String columnVid) throws Exception {
+        return fetchOutputColumnInstancesForColumn(session, columnVid, "");
+    }
+
+    private static List<ColumnInstanceInfo> fetchOutputColumnInstancesForColumn(
+            Session session,
+            String columnVid,
+            String anchorEventId
+    ) throws Exception {
+        Set<String> vids = collectUniqueVids(
+                session,
+                "column_instance_vid",
+                "GO FROM " + quote(columnVid) + " OVER `column_has_instance` YIELD dst(edge) AS column_instance_vid;"
+        );
+        List<ColumnInstanceInfo> allInstances = fetchColumnInstancesByVids(session, vids);
+        List<ColumnInstanceInfo> outputInstances = new ArrayList<ColumnInstanceInfo>();
+        for (ColumnInstanceInfo instance : allInstances) {
+            if ("OUTPUT".equalsIgnoreCase(firstNonEmpty(instance.instanceType))) {
+                outputInstances.add(instance);
+            }
+        }
+        List<ColumnInstanceInfo> candidates = outputInstances.isEmpty() ? allInstances : outputInstances;
+        if (isBlank(anchorEventId)) {
+            return candidates;
+        }
+        List<ColumnInstanceInfo> filtered = new ArrayList<ColumnInstanceInfo>();
+        for (ColumnInstanceInfo candidate : candidates) {
+            if (isColumnInstanceInAnchorEvent(session, candidate.vid, anchorEventId)) {
+                filtered.add(candidate);
+            }
+        }
+        return filtered.isEmpty() ? candidates : filtered;
+    }
+
+    private static boolean isColumnInstanceInAnchorEvent(Session session, String columnInstanceVid, String anchorEventId) throws Exception {
+        if (isBlank(anchorEventId)) {
+            return true;
+        }
+        return hasEventMatchedRows(
+                session,
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(columnInstanceVid) + " OVER `latest_expression_flows_to_column_instance` REVERSELY "
+                        + "YIELD properties(edge).last_event_id AS event_id;",
+                "GO FROM " + quote(columnInstanceVid) + " OVER `latest_column_instance_flows_to_column_instance` REVERSELY "
+                        + "YIELD properties(edge).last_event_id AS event_id;",
+                "GO FROM " + quote(columnInstanceVid) + " OVER `latest_predicate_flows_to_column_instance` REVERSELY "
+                        + "YIELD properties(edge).last_event_id AS event_id;",
+                "GO FROM " + quote(columnInstanceVid) + " OVER `latest_relation_instance_flows_to_column_instance` REVERSELY "
+                        + "YIELD properties(edge).last_event_id AS event_id;"
+        );
+    }
+
+    private static FlowTraversalContext collectFlowContextForColumn(Session session, String columnVid) throws Exception {
+        return collectFlowContextForColumn(session, columnVid, "");
+    }
+
+    private static FlowTraversalContext collectFlowContextForColumn(
+            Session session,
+            String columnVid,
+            String anchorEventId
+    ) throws Exception {
+        FlowTraversalContext context = new FlowTraversalContext();
+        for (ColumnInstanceInfo outputInstance : fetchOutputColumnInstancesForColumn(session, columnVid, anchorEventId)) {
+            traverseColumnInstanceFlow(session, outputInstance.vid, context, anchorEventId);
+        }
+        return context;
+    }
+
+    private static void traverseColumnInstanceFlow(Session session, String columnInstanceVid, FlowTraversalContext context) throws Exception {
+        traverseColumnInstanceFlow(session, columnInstanceVid, context, "");
+    }
+
+    private static void traverseColumnInstanceFlow(
+            Session session,
+            String columnInstanceVid,
+            FlowTraversalContext context,
+            String anchorEventId
+    ) throws Exception {
+        if (isBlank(columnInstanceVid) || !context.visitedColumnInstanceVids.add(columnInstanceVid)) {
+            return;
+        }
+        ColumnInstanceInfo columnInstanceInfo = fetchColumnInstanceInfo(session, columnInstanceVid);
+        if (columnInstanceInfo == null) {
+            return;
+        }
+        if (!isBlank(columnInstanceInfo.columnId)) {
+            context.upstreamColumnVids.add(columnInstanceInfo.columnId);
+        }
+
+        Set<String> upstreamColumnInstances = collectUniqueVidsByEvent(
+                session,
+                "column_instance_vid",
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(columnInstanceVid) + " OVER `latest_column_instance_flows_to_column_instance` REVERSELY "
+                        + "YIELD src(edge) AS column_instance_vid, properties(edge).last_event_id AS event_id;"
+        );
+        for (String upstreamColumnInstanceVid : upstreamColumnInstances) {
+            traverseColumnInstanceFlow(session, upstreamColumnInstanceVid, context, anchorEventId);
+        }
+
+        Set<String> expressionVids = collectUniqueVidsByEvent(
+                session,
+                "expression_vid",
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(columnInstanceVid) + " OVER `latest_expression_flows_to_column_instance` REVERSELY "
+                        + "YIELD src(edge) AS expression_vid, properties(edge).last_event_id AS event_id;"
+        );
+        for (String expressionVid : expressionVids) {
+            context.expressionVids.add(expressionVid);
+            traverseExpressionFlow(session, expressionVid, context, anchorEventId);
+        }
+
+        List<VidRoleRef> predicateRefs = collectVidRolesByEvent(
+                session,
+                "predicate_vid",
+                "role",
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(columnInstanceVid) + " OVER `latest_predicate_flows_to_column_instance` REVERSELY "
+                        + "YIELD src(edge) AS predicate_vid, properties(edge).role AS role, properties(edge).last_event_id AS event_id;"
+        );
+        for (VidRoleRef predicateRef : predicateRefs) {
+            if (!isBlank(predicateRef.vid)) {
+                context.predicateVids.add(predicateRef.vid);
+                traversePredicateFlow(session, predicateRef.vid, context, anchorEventId);
+            }
+        }
+    }
+
+    private static void traverseExpressionFlow(Session session, String expressionVid, FlowTraversalContext context) throws Exception {
+        traverseExpressionFlow(session, expressionVid, context, "");
+    }
+
+    private static void traverseExpressionFlow(
+            Session session,
+            String expressionVid,
+            FlowTraversalContext context,
+            String anchorEventId
+    ) throws Exception {
+        if (isBlank(expressionVid) || !context.visitedExpressionVids.add(expressionVid)) {
+            return;
+        }
+        context.expressionVids.add(expressionVid);
+
+        Set<String> sourceColumnInstances = collectUniqueVidsByEvent(
+                session,
+                "column_instance_vid",
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(expressionVid) + " OVER `latest_column_instance_flows_to_expression` REVERSELY "
+                        + "YIELD src(edge) AS column_instance_vid, properties(edge).last_event_id AS event_id;"
+        );
+        for (String sourceColumnInstanceVid : sourceColumnInstances) {
+            traverseColumnInstanceFlow(session, sourceColumnInstanceVid, context, anchorEventId);
+        }
+
+        Set<String> sourceExpressions = collectUniqueVidsByEvent(
+                session,
+                "expression_vid",
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(expressionVid) + " OVER `latest_expression_flows_to_expression` REVERSELY "
+                        + "YIELD src(edge) AS expression_vid, properties(edge).last_event_id AS event_id;"
+        );
+        for (String sourceExpressionVid : sourceExpressions) {
+            traverseExpressionFlow(session, sourceExpressionVid, context, anchorEventId);
+        }
+
+        context.literalVids.addAll(collectUniqueVidsByEvent(
+                session,
+                "literal_vid",
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(expressionVid) + " OVER `latest_literal_flows_to_expression` REVERSELY "
+                        + "YIELD src(edge) AS literal_vid, properties(edge).last_event_id AS event_id;"
+        ));
+    }
+
+    private static void traversePredicateFlow(Session session, String predicateVid, FlowTraversalContext context) throws Exception {
+        traversePredicateFlow(session, predicateVid, context, "");
+    }
+
+    private static void traversePredicateFlow(
+            Session session,
+            String predicateVid,
+            FlowTraversalContext context,
+            String anchorEventId
+    ) throws Exception {
+        if (isBlank(predicateVid) || !context.visitedPredicateVids.add(predicateVid)) {
+            return;
+        }
+        context.predicateVids.add(predicateVid);
+
+        Set<String> sourceColumnInstances = collectUniqueVidsByEvent(
+                session,
+                "column_instance_vid",
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(predicateVid) + " OVER `latest_column_instance_flows_to_predicate` REVERSELY "
+                        + "YIELD src(edge) AS column_instance_vid, properties(edge).last_event_id AS event_id;"
+        );
+        for (String sourceColumnInstanceVid : sourceColumnInstances) {
+            traverseColumnInstanceFlow(session, sourceColumnInstanceVid, context, anchorEventId);
+        }
+
+        context.literalVids.addAll(collectUniqueVidsByEvent(
+                session,
+                "literal_vid",
+                "event_id",
+                anchorEventId,
+                "GO FROM " + quote(predicateVid) + " OVER `latest_literal_flows_to_predicate` REVERSELY "
+                        + "YIELD src(edge) AS literal_vid, properties(edge).last_event_id AS event_id;"
+        ));
     }
 
     private static List<ColumnInfo> fetchColumnsByVids(Session session, Set<String> columnVids) throws Exception {
@@ -835,6 +1528,40 @@ public final class NebulaFieldCaliberQueryTool {
         return vids;
     }
 
+    private static Set<String> collectUniqueVidsByEvent(
+            Session session,
+            String vidKey,
+            String eventKey,
+            String anchorEventId,
+            String... gqls
+    ) throws Exception {
+        if (isBlank(anchorEventId)) {
+            return collectUniqueVids(session, vidKey, gqls);
+        }
+        Set<String> vids = new LinkedHashSet<String>();
+        if (gqls == null) {
+            return vids;
+        }
+        for (String gql : gqls) {
+            ResultSet resultSet = tryExecuteAllowMissingEdge(session, gql);
+            if (resultSet == null) {
+                continue;
+            }
+            for (int i = 0; i < resultSet.rowsSize(); i++) {
+                ResultSet.Record record = resultSet.rowValues(i);
+                String eventId = value(record, eventKey);
+                if (!anchorEventId.equals(eventId)) {
+                    continue;
+                }
+                String vid = value(record, vidKey);
+                if (!isBlank(vid)) {
+                    vids.add(vid);
+                }
+            }
+        }
+        return vids;
+    }
+
     private static List<VidRoleRef> collectVidRoles(Session session, String vidKey, String roleKey, String... gqls) throws Exception {
         List<VidRoleRef> refs = new ArrayList<VidRoleRef>();
         Set<String> seen = new LinkedHashSet<String>();
@@ -860,6 +1587,71 @@ public final class NebulaFieldCaliberQueryTool {
             }
         }
         return refs;
+    }
+
+    private static List<VidRoleRef> collectVidRolesByEvent(
+            Session session,
+            String vidKey,
+            String roleKey,
+            String eventKey,
+            String anchorEventId,
+            String... gqls
+    ) throws Exception {
+        if (isBlank(anchorEventId)) {
+            return collectVidRoles(session, vidKey, roleKey, gqls);
+        }
+        List<VidRoleRef> refs = new ArrayList<VidRoleRef>();
+        Set<String> seen = new LinkedHashSet<String>();
+        if (gqls == null) {
+            return refs;
+        }
+        for (String gql : gqls) {
+            ResultSet resultSet = tryExecuteAllowMissingEdge(session, gql);
+            if (resultSet == null) {
+                continue;
+            }
+            for (int i = 0; i < resultSet.rowsSize(); i++) {
+                ResultSet.Record record = resultSet.rowValues(i);
+                String eventId = value(record, eventKey);
+                if (!anchorEventId.equals(eventId)) {
+                    continue;
+                }
+                String vid = value(record, vidKey);
+                String role = value(record, roleKey);
+                if (isBlank(vid)) {
+                    continue;
+                }
+                String key = vid + "|" + firstNonEmpty(role, "");
+                if (seen.add(key)) {
+                    refs.add(new VidRoleRef(vid, role));
+                }
+            }
+        }
+        return refs;
+    }
+
+    private static boolean hasEventMatchedRows(
+            Session session,
+            String eventKey,
+            String anchorEventId,
+            String... gqls
+    ) throws Exception {
+        if (isBlank(anchorEventId) || gqls == null) {
+            return false;
+        }
+        for (String gql : gqls) {
+            ResultSet resultSet = tryExecuteAllowMissingEdge(session, gql);
+            if (resultSet == null) {
+                continue;
+            }
+            for (int i = 0; i < resultSet.rowsSize(); i++) {
+                String eventId = value(resultSet.rowValues(i), eventKey);
+                if (anchorEventId.equals(eventId)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private static ResultSet tryExecuteAllowMissingEdge(Session session, String gql) throws Exception {
@@ -912,7 +1704,11 @@ public final class NebulaFieldCaliberQueryTool {
                 "FETCH PROP ON `expression_node` " + quote(expressionVid)
                         + " YIELD `expression_node`.`expression_type` AS expression_type,"
                         + "`expression_node`.`expression_sql` AS expression_sql,"
-                        + "`expression_node`.`normalized_expression` AS normalized_expression;");
+                        + "`expression_node`.`normalized_expression` AS normalized_expression,"
+                        + "`expression_node`.`expression_category` AS expression_category,"
+                        + "`expression_node`.`display_sql` AS display_sql,"
+                        + "`expression_node`.`query_block_id` AS query_block_id,"
+                        + "`expression_node`.`plan_node_id` AS plan_node_id;");
         if (resultSet.isEmpty()) {
             return null;
         }
@@ -921,7 +1717,11 @@ public final class NebulaFieldCaliberQueryTool {
                 expressionVid,
                 value(record, "expression_type"),
                 value(record, "expression_sql"),
-                value(record, "normalized_expression")
+                value(record, "normalized_expression"),
+                value(record, "expression_category"),
+                value(record, "display_sql"),
+                value(record, "query_block_id"),
+                value(record, "plan_node_id")
         );
     }
 
@@ -949,7 +1749,11 @@ public final class NebulaFieldCaliberQueryTool {
                         + " YIELD `predicate_node`.`predicate_type` AS predicate_type,"
                         + "`predicate_node`.`predicate_sql` AS predicate_sql,"
                         + "`predicate_node`.`normalized_predicate` AS normalized_predicate,"
-                        + "`predicate_node`.`scope_id` AS scope_id;");
+                        + "`predicate_node`.`scope_id` AS scope_id,"
+                        + "`predicate_node`.`predicate_role` AS predicate_role,"
+                        + "`predicate_node`.`display_sql` AS display_sql,"
+                        + "`predicate_node`.`query_block_id` AS query_block_id,"
+                        + "`predicate_node`.`plan_node_id` AS plan_node_id;");
         if (resultSet.isEmpty()) {
             return null;
         }
@@ -959,7 +1763,11 @@ public final class NebulaFieldCaliberQueryTool {
                 value(record, "predicate_type"),
                 value(record, "predicate_sql"),
                 value(record, "normalized_predicate"),
-                value(record, "scope_id")
+                value(record, "scope_id"),
+                value(record, "predicate_role"),
+                value(record, "display_sql"),
+                value(record, "query_block_id"),
+                value(record, "plan_node_id")
         );
     }
 
@@ -1064,9 +1872,15 @@ public final class NebulaFieldCaliberQueryTool {
         }
         List<String> parts = new ArrayList<String>();
         for (PredicateUsageInfo usage : usages) {
-            String sql = firstNonEmpty(usage.predicate.predicateSql, usage.predicate.normalizedPredicate, usage.predicate.vid);
+            String sql = firstNonEmpty(
+                    usage.predicate.displaySql,
+                    usage.predicate.predicateSql,
+                    usage.predicate.normalizedPredicate,
+                    usage.predicate.vid
+            );
             String sourceRef = isBlank(usage.sourceRef) ? "unknown" : usage.sourceRef;
-            String roleSuffix = isBlank(usage.role) ? "" : " | role=" + usage.role;
+            String role = firstNonEmpty(usage.role, usage.predicate.predicateRole);
+            String roleSuffix = isBlank(role) ? "" : " | role=" + role;
             parts.add(sql + " | source=" + sourceRef + roleSuffix);
         }
         return String.join("; ", parts);
@@ -1149,6 +1963,31 @@ public final class NebulaFieldCaliberQueryTool {
             return columnId.substring(splitIndex + 1);
         }
         return columnId;
+    }
+
+    private static long parseTimeToLong(String value) {
+        if (isBlank(value)) {
+            return Long.MIN_VALUE;
+        }
+        try {
+            return Long.parseLong(value);
+        } catch (NumberFormatException ignored) {
+        }
+        StringBuilder digits = new StringBuilder();
+        for (int i = 0; i < value.length(); i++) {
+            char ch = value.charAt(i);
+            if (ch >= '0' && ch <= '9') {
+                digits.append(ch);
+            }
+        }
+        if (digits.length() == 0) {
+            return Long.MIN_VALUE;
+        }
+        try {
+            return Long.parseLong(digits.toString());
+        } catch (NumberFormatException ignored) {
+            return Long.MIN_VALUE;
+        }
     }
 
     private static boolean isBlank(String value) {
@@ -1303,12 +2142,29 @@ public final class NebulaFieldCaliberQueryTool {
         private final String expressionType;
         private final String expressionSql;
         private final String normalizedExpression;
+        private final String expressionCategory;
+        private final String displaySql;
+        private final String queryBlockId;
+        private final String planNodeId;
 
-        private ExpressionInfo(String vid, String expressionType, String expressionSql, String normalizedExpression) {
+        private ExpressionInfo(
+                String vid,
+                String expressionType,
+                String expressionSql,
+                String normalizedExpression,
+                String expressionCategory,
+                String displaySql,
+                String queryBlockId,
+                String planNodeId
+        ) {
             this.vid = vid;
             this.expressionType = expressionType;
             this.expressionSql = expressionSql;
             this.normalizedExpression = normalizedExpression;
+            this.expressionCategory = expressionCategory;
+            this.displaySql = displaySql;
+            this.queryBlockId = queryBlockId;
+            this.planNodeId = planNodeId;
         }
     }
 
@@ -1332,13 +2188,31 @@ public final class NebulaFieldCaliberQueryTool {
         private final String predicateSql;
         private final String normalizedPredicate;
         private final String scopeId;
+        private final String predicateRole;
+        private final String displaySql;
+        private final String queryBlockId;
+        private final String planNodeId;
 
-        private PredicateInfo(String vid, String predicateType, String predicateSql, String normalizedPredicate, String scopeId) {
+        private PredicateInfo(
+                String vid,
+                String predicateType,
+                String predicateSql,
+                String normalizedPredicate,
+                String scopeId,
+                String predicateRole,
+                String displaySql,
+                String queryBlockId,
+                String planNodeId
+        ) {
             this.vid = vid;
             this.predicateType = predicateType;
             this.predicateSql = predicateSql;
             this.normalizedPredicate = normalizedPredicate;
             this.scopeId = scopeId;
+            this.predicateRole = predicateRole;
+            this.displaySql = displaySql;
+            this.queryBlockId = queryBlockId;
+            this.planNodeId = planNodeId;
         }
     }
 
@@ -1415,6 +2289,11 @@ public final class NebulaFieldCaliberQueryTool {
         private final String sourceType;
         private final String aliasName;
         private final String planNodeName;
+        private final String queryBlockId;
+        private final String planNodeId;
+        private final String joinType;
+        private final String nullSupplySide;
+        private final boolean subquerySource;
 
         private RelationInstanceInfo(
                 String vid,
@@ -1423,7 +2302,12 @@ public final class NebulaFieldCaliberQueryTool {
                 String sourceTableId,
                 String sourceType,
                 String aliasName,
-                String planNodeName
+                String planNodeName,
+                String queryBlockId,
+                String planNodeId,
+                String joinType,
+                String nullSupplySide,
+                boolean subquerySource
         ) {
             this.vid = vid;
             this.instanceName = instanceName;
@@ -1432,7 +2316,32 @@ public final class NebulaFieldCaliberQueryTool {
             this.sourceType = sourceType;
             this.aliasName = aliasName;
             this.planNodeName = planNodeName;
+            this.queryBlockId = queryBlockId;
+            this.planNodeId = planNodeId;
+            this.joinType = joinType;
+            this.nullSupplySide = nullSupplySide;
+            this.subquerySource = subquerySource;
         }
+    }
+
+    private static final class EventCandidate {
+        private final String eventId;
+        private final long lastSeenTime;
+
+        private EventCandidate(String eventId, long lastSeenTime) {
+            this.eventId = eventId;
+            this.lastSeenTime = lastSeenTime;
+        }
+    }
+
+    private static final class FlowTraversalContext {
+        private final Set<String> visitedColumnInstanceVids = new HashSet<String>();
+        private final Set<String> visitedExpressionVids = new HashSet<String>();
+        private final Set<String> visitedPredicateVids = new HashSet<String>();
+        private final Set<String> expressionVids = new LinkedHashSet<String>();
+        private final Set<String> predicateVids = new LinkedHashSet<String>();
+        private final Set<String> upstreamColumnVids = new LinkedHashSet<String>();
+        private final Set<String> literalVids = new LinkedHashSet<String>();
     }
 
     private static final class ColumnInstanceResolution {

@@ -62,7 +62,8 @@ public final class NebulaGraphConfig implements Serializable {
     }
 
     public static NebulaGraphConfig fromSystem() {
-        String host = read(HOST_PROPERTY, HOST_ENV, "192.168.152.128");
+//        String host = read(HOST_PROPERTY, HOST_ENV, "192.168.152.128");
+        String host = read(HOST_PROPERTY, HOST_ENV, "127.0.0.1");
         int port = parseInt(read(PORT_PROPERTY, PORT_ENV, "9669"), 9669);
         return new NebulaGraphConfig(
                 host,
