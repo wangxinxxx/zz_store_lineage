@@ -535,7 +535,17 @@ public final class SparkNebulaConnectorImporter {
     }
 
     private static String normalizeType(String type) {
-        return type == null ? "" : type.trim().toLowerCase();
+        if (type == null) {
+            return "";
+        }
+        String normalized = type.trim().toLowerCase();
+        if ("int".equals(normalized) || "integer".equals(normalized) || "long".equals(normalized) || "int64".equals(normalized)) {
+            return "int64";
+        }
+        if ("bool".equals(normalized) || "boolean".equals(normalized)) {
+            return "bool";
+        }
+        return normalized;
     }
 
     private static boolean isCreateSpaceStatement(String statement) {
